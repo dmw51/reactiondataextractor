@@ -27,8 +27,8 @@ import logging
 #from . import decorators
 from itertools import product
 import numpy as np
+from models.utils import Point
 
-from .arrows import BaseArrow
 
 log = logging.getLogger(__name__)
 
@@ -115,15 +115,20 @@ class Rect(object):
         return (other_rect.left >= self.left and other_rect.right <= self.right and
                 other_rect.top >= self.top and other_rect.bottom <= self.bottom)
 
-    def overlaps(self, other_rect):
+    def overlaps(self, other):
         """Return true if ``other_rect`` overlaps this rect.
 
         :param Rect other_rect: Another rectangle.
         :return: Whether ``other_rect`` overlaps this rect.
         :rtype: bool
         """
-        return (min(self.right, other_rect.right) > max(self.left, other_rect.left) and
-                min(self.bottom, other_rect.bottom) > max(self.top, other_rect.top))
+        if isinstance(other,Rect):
+            overlaps = (min(self.right, other.right) > max(self.left, other.left) and
+                    min(self.bottom, other.bottom) > max(self.top, other.top))
+        elif isinstance(other,Point):
+            overlaps = any(row in range(self.top, self.bottom) and
+                       col in range(self.left, self.right) for row, col in other.pixels)
+        return overlaps
 
     def separation(self, other):
         """ Returns the distance between the center of each graph
@@ -198,4 +203,3 @@ class Figure(object):
         top, bottom = np.where(cols)[0][[0, -1]]
         return Panel(left, right, top, bottom)
 
-    

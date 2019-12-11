@@ -8,5 +8,7 @@ import logging
 
 log = logging.getLogger((__name__))
 
-Point = namedtuple('Point','x y')
+Point = namedtuple('Point','row col')
 #Line class?
+
+Line = namedtuple('Line','pixels')
