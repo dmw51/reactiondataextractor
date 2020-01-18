@@ -27,7 +27,7 @@ import logging
 #from . import decorators
 from itertools import product
 import numpy as np
-from models.utils import Point
+from models.utils import Line, Point
 
 
 log = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class Rect(object):
     """
 
     # Order in init changes to match that in skimage measure.regionprops.bbox
-    def __init__(self, top, left, bottom, right):
+    def __init__(self, left, right, top, bottom):
         """
 
         :param int left: Left edge of rectangle.
@@ -69,6 +69,15 @@ class Rect(object):
         return self.bottom - self.top
 
     @property
+    def aspect_ratio(self):
+        """
+        Returns aspect ratio of a rectangle.
+
+        :rtype : float
+        """
+        return self.width/self.height
+
+    @property
     def perimeter(self):
         """Return length of the perimeter around rectangle.
 
@@ -83,6 +92,13 @@ class Rect(object):
         :rtype: int
         """
         return self.width * self.height
+
+    @property
+    def diagonal_length(self):
+        """
+        Return the length of diagonal of a connected component as a float.
+        """
+        return np.hypot(self.height, self.width)
 
     @property
     def center(self):
@@ -122,12 +138,12 @@ class Rect(object):
         :return: Whether ``other_rect`` overlaps this rect.
         :rtype: bool
         """
-        if isinstance(other,Rect):
+        if isinstance(other, Rect):
             overlaps = (min(self.right, other.right) > max(self.left, other.left) and
                     min(self.bottom, other.bottom) > max(self.top, other.top))
-        elif isinstance(other,Point):
-            overlaps = any(row in range(self.top, self.bottom) and
-                       col in range(self.left, self.right) for row, col in other.pixels)
+        elif isinstance(other, Line):
+            overlaps = any(p.row in range(self.top, self.bottom) and
+                       p.col in range(self.left, self.right) for p in other.pixels)
         return overlaps
 
     def separation(self, other):
@@ -137,15 +153,14 @@ class Rect(object):
         :return: Distance between centoids of rectangle
         :rtype: float
         """
-        # TODO: Generalise to a point
         if isinstance(other, Rect):
-            y = other.center[0]
-            x = other.center[1]
+            y = other.center[1]
+            x = other.center[0]
         elif isinstance(other, Point):
-            y = other.y
-            x = other.x
-        length = abs(self.center[0] - x)
-        height = abs(self.center[1] - y)
+            y = other.row
+            x = other.col
+        height = abs(self.center[0] - x)
+        length = abs(self.center[1] - y)
         return np.hypot(length, height)
 
     def __repr__(self):
@@ -165,6 +180,32 @@ class Rect(object):
 
     def __hash__(self):
         return hash((self.left, self.right, self.top, self.bottom))
+
+
+class Panel(Rect):
+    """ Tagged section inside Figure"""
+
+    def __init__(self, left, right, top, bottom, tag=0):
+        super(Panel, self).__init__(left, right, top, bottom)
+        self.tag = tag
+        self._repeating = False
+        self._pixel_ratio = None
+
+    @property
+    def repeating(self):
+        return self._repeating
+
+    @repeating.setter
+    def repeating(self, repeating):
+        self._repeating = repeating
+
+    @property
+    def pixel_ratio(self):
+        return self._pixel_ratio
+
+    @pixel_ratio.setter
+    def pixel_ratio(self, pixel_ratio):
+        self._pixel_ratio = pixel_ratio
 
 class Figure(object):
     """A figure image."""
