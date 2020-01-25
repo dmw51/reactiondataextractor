@@ -9,7 +9,7 @@ from itertools import product, tee
 import numpy as np
 
 
-from utils.processing import merge_overlapping, remove_small_fully_contained
+from utils.processing import remove_small_fully_contained
 
 log = logging.getLogger(__name__)
 

@@ -120,6 +120,23 @@ class Rect(object):
         xcenter, ycenter = self.center
         return int(np.around(xcenter)), int(np.around(ycenter))
 
+    def __repr__(self):
+        return '%s(left=%s, right=%s, top=%s, bottom=%s)' % (
+            self.__class__.__name__, self.left, self.right, self.top, self.bottom
+        )
+
+    def __str__(self):
+        return '<%s (%s, %s, %s, %s)>' % (self.__class__.__name__, self.left, self.right, self.top, self.bottom)
+
+    def __eq__(self, other):
+        if self.left == other.left and self.right == other.right \
+                and self.top == other.top and self.bottom == other.bottom:
+            return True
+        else:
+            return False
+
+    def __hash__(self):
+        return hash((self.left, self.right, self.top, self.bottom))
 
     def contains(self, other_rect):
         """Return true if ``other_rect`` is within this rect.
@@ -146,6 +163,7 @@ class Rect(object):
                        p.col in range(self.left, self.right) for p in other.pixels)
         return overlaps
 
+
     def separation(self, other):
         """ Returns the distance between the center of each graph
 
@@ -162,24 +180,6 @@ class Rect(object):
         height = abs(self.center[0] - x)
         length = abs(self.center[1] - y)
         return np.hypot(length, height)
-
-    def __repr__(self):
-        return '%s(left=%s, right=%s, top=%s, bottom=%s)' % (
-            self.__class__.__name__, self.left, self.right, self.top, self.bottom
-        )
-
-    def __str__(self):
-        return '<%s (%s, %s, %s, %s)>' % (self.__class__.__name__, self.left, self.right, self.top, self.bottom)
-
-    def __eq__(self, other):
-        if self.left == other.left and self.right == other.right \
-                and self.top == other.top and self.bottom == other.bottom:
-            return True
-        else:
-            return False
-
-    def __hash__(self):
-        return hash((self.left, self.right, self.top, self.bottom))
 
 
 class Panel(Rect):
@@ -233,6 +233,10 @@ class Figure(object):
     def __str__(self):
         return '<%s>' % self.__class__.__name__
 
+    @property
+    def diagonal(self):
+        return np.hypot(self.width, self.height)
+
     def get_bounding_box(self):
         """ Returns the Panel object for the extreme bounding box of the image
 
@@ -243,4 +247,5 @@ class Figure(object):
         left, right = np.where(rows)[0][[0, -1]]
         top, bottom = np.where(cols)[0][[0, -1]]
         return Panel(left, right, top, bottom)
+
 

@@ -1,4 +1,4 @@
-from collections import namedtuple
+from collections import namedtuple, Counter
 import copy
 from itertools import product, chain
 
@@ -6,21 +6,28 @@ import logging
 import numpy as np
 
 from scipy.ndimage import label
+from scipy.signal import find_peaks
 from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize as skeletonize_skimage
 from skimage.measure import regionprops
+from sklearn.neighbors import KernelDensity
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import GridSearchCV
 
 from config import get_area
 from models.arrows import SolidArrow
 from models.exceptions import NotAnArrowException
 from models.reaction import ReactionStep,Conditions,Reactant,Product,Intermediate
-from models.segments import Panel
+from models.segments import Rect, Panel, Figure
 from models.utils import Point, Line
-from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill
-from utils.processing import binary_tag, get_bounding_box
+from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill, pad
+from utils.processing import binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, belongs_to_textline, is_boundary_cc, find_textline_threshold
+import cv2
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.WARNING)
 
 formatter = logging.Formatter('%(levelname)s:%(name)s: %(message)s')
 file_handler = logging.FileHandler('actions.log')
@@ -76,7 +83,7 @@ def segment(bin_fig, arrows):
         log.debug("Segmentation kernel size = %s" % kernel)
 
     # Using a binary floodfill to identify panel regions
-    fill_img = binary_floodfill(closed_fig)
+    fill_img = binary_floodfill(bin_fig)
     tag_img = binary_tag(fill_img)
     panels = get_bounding_box(tag_img)
 
@@ -165,7 +172,7 @@ def find_solid_arrows_main_routine(fig,threshold=None, min_arrow_length=None):
 
 
 
-def find_reaction_conditions(fig, arrow, panels, global_skel_pixel_ratio,stepsize=10):
+def find_reaction_conditions(fig, arrow, panels, global_skel_pixel_ratio,stepsize=10,steps=10):
     """
     Given a reaction arrow_bbox and all other bboxes, this function looks for reaction information around it
     If dense_graph is true, the initial arrow's bbox is scaled down to avoid false positives
@@ -176,35 +183,47 @@ def find_reaction_conditions(fig, arrow, panels, global_skel_pixel_ratio,stepsiz
     :param float global_skel_pixel_ratio: value describing density of on-pixels in a graph
     :param int stepsize: integer value decribing size of step between two line scanning operations
     """
-
-    p1, p2 = copy.deepcopy(arrow.line[0]), copy.deepcopy((arrow.line[-1]))
-    if global_skel_pixel_ratio > 0.15:
-        p1.col *= 1.2
-        p2.col *= 0.8
+    arrow = copy.deepcopy(arrow)
+    sorted_pts_col = sorted(arrow.line,key= lambda pt: pt.col)
+    p1, p2 = sorted_pts_col[0], sorted_pts_col[-1]
+    #'Squeeze the two points in the second dimension to avoid overlap with structures on either side
 
     overlapped = set()
-
     for direction in range(2):
-        i = 0
+        boredom_index = 0 #increments if no overlaps found. if nothing found in 5 steps,
+        # the algorithm breaks from a loop
         increment = (-1) ** direction
-        p1_scanrow, p2_scanrow = copy.copy(p1.row), copy.copy(p2.row)
-        for offset in range(fig.img.shape[0]//stepsize):
-            if i >= 20: #Take no more than 20 steps
-                break
+        p1_scancol, p2_scancol = p1.col, p2.col
+        p1_scanrow, p2_scanrow = p1.row, p2.row
+        for step in range(steps):
+            #Reduce the scanned area proportionally to distance from arrow
+            p1_scancol = int(p1_scancol * 1.05) # These changes dont work as expected - need to check them
+            p2_scancol = int(p2_scancol * 0.9)
+
             #print('p1: ',p1_scanrow,p1.col)
             #print('p2: ', p2_scanrow,p2.col)
             p1_scanrow += increment*stepsize
             p2_scanrow += increment*stepsize
-            line = approximate_line(Point(row=p1_scanrow, col=p1.col), Point(row=p2_scanrow, col=p2.col))
-            overlapped.update([panel for panel in panels if panel.overlaps(line)])
-            i += 1
-    conditions = create_megabox(overlapped)
-    return {conditions} #Return as a set to allow handling along with product and reactant sets
+            line = approximate_line(Point(row=p1_scanrow, col=p1_scancol), Point(row=p2_scanrow, col=p2_scancol))
+            overlapping_panels = [panel for panel in panels if panel.overlaps(line)]
+
+            if overlapping_panels:
+                overlapped.update(overlapping_panels)
+                boredom_index = 0
+            else:
+                boredom_index +=1
+
+            if boredom_index >= 5: #Nothing found in the last five steps
+                break
+
+    conditions_text = scan_conditions_text(fig,overlapped,arrow)
+
+    return set(conditions_text) #Return as a set to allow handling along with product and reactant sets
 
 
-def scan_all_reaction_steps(fig, all_arrows, panels,global_skel_pixel_ratio, stepsize=30):
+def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_pixel_ratio, stepsize=30):
     """
-
+    Main subroutine for reaction step scanning
     :param Figure fig: Figure object being processed
     :param iterable all_arrows: List of all found arrows
     :param iterable panels: List of all connected components
@@ -214,10 +233,7 @@ def scan_all_reaction_steps(fig, all_arrows, panels,global_skel_pixel_ratio, ste
     """
     steps =[]
     control_set = set()
-    all_conditions = []
-    for arrow in all_arrows:
-        conditions = find_reaction_conditions(fig, arrow, panels, global_skel_pixel_ratio)
-        all_conditions.append(conditions)
+
     for idx,arrow in enumerate(all_arrows):
         ccs_reacts_prods = find_step_reactants_and_products(fig,all_conditions[idx],arrow,all_arrows,panels)
 
@@ -226,10 +242,17 @@ def scan_all_reaction_steps(fig, all_arrows, panels,global_skel_pixel_ratio, ste
         control_set.update(*(value for value in panels_dict.values())) # The unpacking looks ugly
 
         conditions = Conditions(connected_components=all_conditions[idx])
-        reacts=Reactant(connected_components=panels_dict['reactants'])
-        prods = Product(connected_components=panels_dict['products'])
+        reacts = panels_dict['reactants']
+        prods = panels_dict['products']
+        if global_skel_pixel_ratio > 0.02 : #Original kernel size < 6
+            reacts = postprocessing_close_merge(fig, reacts)
+            prods = postprocessing_close_merge(fig, prods)
+            log.debug('Postprocessing closing and merging finished.')
+
+        reacts=Reactant(connected_components=reacts)
+        prods = Product(connected_components=prods)
         steps.append(ReactionStep(arrow,reacts,prods, conditions))
-        print('panels:', panels)
+        #print('panels:', panels)
     if control_set != panels:
         log.warning('Some connected components remain unassigned following scan_all_reaction_steps.')
     else:
@@ -247,7 +270,6 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
     log.info('Looking for reactants and products around arrow %s', step_arrow)
     megabox_ccs = copy.deepcopy(step_conditions)
     megabox_ccs.add(step_arrow)
-    print('megabox ccs:', megabox_ccs)
     megabox = create_megabox(megabox_ccs)
     top_left = Point(row=megabox.top, col=megabox.left)
     bottom_left = Point(row=megabox.bottom, col=megabox.left)
@@ -336,17 +358,17 @@ def assign_to_nearest(all_ccs,conditions, reactants, products, threshold=None):
     :return dictionary: The modified groups
     """
     log.debug('Assigning connected components based on distance')
-    print('assign: conditions set: ', conditions)
+    #print('assign: conditions set: ', conditions)
     conditions_ccs = [cc for inner_set in conditions for cc in inner_set]
     classified_ccs = set((*conditions_ccs, *reactants, *products))
-    print('diagonal lengths: ')
-    print([cc.diagonal_length for cc in classified_ccs])
-    threshold = max([cc.diagonal_length for cc in classified_ccs])
+    #print('diagonal lengths: ')
+    #print([cc.diagonal_length for cc in classified_ccs])
+    threshold = np.mean(([cc.diagonal_length for cc in classified_ccs]))
     unclassified =  all_ccs.difference(classified_ccs)
     for cc in unclassified:
         classified_ccs = sorted(classified_ccs, key=lambda elem: elem.separation(cc))
         nearest = classified_ccs[0]
-        groups = [ reactants, products]
+        groups = [reactants, products]
         for group in groups:
             if nearest in group and nearest.separation(cc) < threshold:
                 group.add(cc)
@@ -354,4 +376,206 @@ def assign_to_nearest(all_ccs,conditions, reactants, products, threshold=None):
 
 
     return {'reactants':reactants, 'products':products}
+
+def scan_conditions_text(fig, conditions,arrow):
+    """
+    Crops a larger area around raw conditions to look for additional text elements that have
+    not been correctly recognised as conditions
+    :param Figure fig: analysed figure with binarised image object
+    :param iterable of Panels conditions: set or list of raw conditions (output of `find_reaction_conditions`)
+    :return: Set of Panels containing all recognised conditions
+    """
+
+    fig = copy.deepcopy(fig)
+    extended_boundary = 50
+    conditions = create_megabox(conditions)
+    fig = erase_elements(fig,[arrow])
+    raw_conditions_region = crop(fig.img, conditions.left, conditions.right,
+               conditions.top, conditions.bottom)['img']
+    p = 5 #padding amount
+    raw_conditions_region = pad(raw_conditions_region,[(p,p),(p,p)],'constant',constant_values=0)
+    #raw_conditions_region = binary_close(Figure(raw_conditions_region),1).img
+    labelled = binary_tag(Figure(raw_conditions_region))
+    ccs = get_bounding_box(labelled)
+    # bottoms = [cc.bottom for cc in ccs]
+    # bottoms.sort()
+    #
+    # bottom_count = Counter(bottoms)
+    # #bottom_count = Counter({value:count for value, count in bottom_count.items() if count>1})
+    # bottoms = np.array([item for item in bottom_count.elements()]).reshape(-1,1)
+    #
+    # #counts_values = np.array([[bottom, count] for bottom, count in bottom_count.items()]).reshape(-1,1)
+    # # logprobs=[]
+    # # bandwiths = np.linspace(.1,5,500)
+    # # for bandwith in bandwiths:
+    # #     kde = KernelDensity(bandwith,kernel='tophat')
+    # #     kde.fit(bottoms)
+    # #     logprob = kde.score(bottoms)
+    # #     logprobs.append(logprob)
+    #
+    # grid = GridSearchCV(KernelDensity(),
+    #                     {'bandwidth': np.linspace(0.005, 2.0, 100)},
+    #                     cv=5)  # 20-fold cross-validation
+    # grid.fit(bottoms)
+    # best_bw = grid.best_params_['bandwidth']
+    # kde = KernelDensity(best_bw,kernel='exponential')
+    # kde.fit(bottoms)
+    #
+    # print(f'params: {kde.get_params()}')
+    # s = np.linspace(0, raw_conditions_region.shape[0],raw_conditions_region.shape[0]+1)
+    # e = kde.score_samples(s.reshape(-1,1))
+    #
+    # plt.hist(bottoms,bins=20,range=[0,raw_conditions_region.shape[0]])
+    # plt.show()
+    # # plt.plot(s, e)
+    # # plt.show()
+    #
+    # heights = [cc.bottom-cc.top for cc in ccs]
+    # mean_height = np.mean(heights,dtype=np.uint32)
+    # kde_trial_lower, _ = find_peaks(e,distance=mean_height)
+    # np_peaks = np.diff(np.sign(np.diff(e)))
+    # np_peaks = np.where(np_peaks < 0)[0] #need to extract the first array
+    # print(f'np peaks: {np_peaks}')
+    # kde_trial_lower.sort()
+    # plt.plot(s, e)
+    # plt.scatter(kde_trial_lower,[0 for elem in kde_trial_lower])
+    # plt.scatter(np_peaks, [0 for elem in np_peaks])
+    # plt.show()
+    # line_buckets = []
+    # bottoms = bottoms.reshape(-1)
+    # print(f'bottoms: {bottoms}')
+    # for peak in kde_trial_lower:
+    #     bucket = [elem for elem in bottoms if elem in range(peak-3, peak+3)]
+    #     line_buckets.append(bucket)
+    #
+    # print(f'list of buckets: {line_buckets}')
+
+
+    #print(f'bottom count: {bottom_count}')
+    # plt.imshow(raw_conditions_region)
+    # plt.show()
+
+    upper, lower = identify_textlines(ccs,raw_conditions_region)
+
+    #upper = [bottom_textline-mean_height for bottom_textline in lower]
+    # TODO: Make sure there is equal number of upper and lower lines and that they have approximately consistent height
+    print(f'lower before transformation: {lower}')
+    search_region = Rect(conditions.left-extended_boundary, conditions.right+extended_boundary,
+               conditions.top-extended_boundary, conditions.bottom+extended_boundary)
+    print(f'search region: {search_region}')
+    crop_dct = crop(fig.img, search_region.left, search_region.right, search_region.top, search_region.bottom)
+    roi = crop_dct['img']
+    roi = binary_close(Figure(roi),1)
+    roi = roi.img
+    boundaries = crop_dct['rectangle'] #This is necessary in case a smaller area is cropped
+    print(f'actual boundaries :{boundaries}')
+    #Move lines to the new extended region
+    vertical_shift = extended_boundary if search_region.top > 0 else conditions.top #if still within the image after expansion,
+    # then choose the extended boundary, else the shift is the distance from top as crop cannot goe beyond 0
+    # print(f'horizontal, vertical: {horizontal_shift, vertical_shift}')
+    lower = [row+vertical_shift-p for row in lower]
+#    kde_lower = [kde_trial_lower+vertical_shift-p for row in kde_trial_lower]
+    print(f'lower in the search region: {lower}')
+    upper = [row+vertical_shift-p for row in upper]
+    f, ax = plt.subplots()
+    ax.imshow(roi)
+    for line in lower:
+       ax.plot([i for i in range(roi.shape[1])],[line for i in range(roi.shape[1])],color='r')
+    for line in upper:
+       ax.plot([i for i in range(roi.shape[1])],[line for i in range(roi.shape[1])],color='b')
+
+    # for line in kde_lower:
+    #     ax.plot([i for i in range(roi.shape[1])], [line for i in range(roi.shape[1])], color='m')
+    # plt.show()
+
+    upper.sort()
+    lower.sort()
+    textlines = [Panel(left=0, right=roi.shape[1],top=top_line, bottom=bottom_line)
+                 for top_line, bottom_line in zip(upper,lower)]
+    #print('textlines:...')
+    #print(textlines)
+
+    f, ax = plt.subplots()
+    plt.imshow(roi)
+    for panel in textlines:
+       rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='g',edgecolor='b')
+       ax.add_patch(rect_bbox)
+
+    labelled = binary_tag(Figure(roi))
+    ccs = get_bounding_box(labelled)
+    text_candidates =[]
+    # print(f'textlines: {textlines}')
+    # ax.imshow(roi)
+    for cc in ccs:
+        if any(belongs_to_textline(roi,cc,textline) for textline in textlines):
+            text_candidates.append(cc)
+    text_candidates = [cc for cc in text_candidates if not is_boundary_cc(roi,cc)]
+    for panel in text_candidates:
+        rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
+        ax.add_patch(rect_bbox)
+    plt.show()
+    # TODO: Add another condition that entire original cc is in the crop
+
+    #Transform boxes back into the main image coordinate system
+    text_elements =[]
+    for element in text_candidates:
+        height = element.bottom - element.top
+        width = element.right - element.left
+        p = Panel(left=boundaries.left+element.left, right=boundaries.left+element.left+width,
+                           top=boundaries.top+element.top, bottom=boundaries.top+element.top+height)
+        text_elements.append(p)
+
+    return text_elements
+
+def identify_textlines(ccs,raw_cond):
+    bottom_boundaries = [cc.bottom for cc in ccs]
+    bottom_boundaries.sort()
+
+    bottom_count = Counter(bottom_boundaries)
+    # bottom_count = Counter({value:count for value, count in bottom_count.items() if count>1})
+    bottom_boundaries = np.array([item for item in bottom_count.elements()]).reshape(-1, 1)
+
+    grid = GridSearchCV(KernelDensity(),
+                        {'bandwidth': np.linspace(0.005, 2.0, 100)},
+                        cv=5)  # 20-fold cross-validation
+    grid.fit(bottom_boundaries)
+    best_bw = grid.best_params_['bandwidth']
+    kde = KernelDensity(best_bw, kernel='exponential')
+    kde.fit(bottom_boundaries)
+
+    # print(f'params: {kde.get_params()}')
+    rows= np.linspace(0, raw_cond.shape[0], raw_cond.shape[0] + 1)
+    logp = kde.score_samples(rows.reshape(-1, 1))
+
+    # plt.hist(bottom_boundaries, bins=20, range=[0, raw_cond.shape[0]])
+    # plt.show()
+    # plt.plot(s, e)
+    # plt.show()
+
+    heights = [cc.bottom - cc.top for cc in ccs]
+    mean_height = np.mean(heights, dtype=np.uint32)
+    kde_trial_lower, _ = find_peaks(logp, distance=mean_height)
+    kde_trial_lower.sort()
+    plt.plot(rows, logp)
+    plt.scatter(kde_trial_lower, [0 for elem in kde_trial_lower])
+    plt.show()
+    line_buckets = []
+    for peak in kde_trial_lower:
+        bucket = [cc for cc in ccs if cc.bottom in range(peak - 3, peak + 3)]
+        line_buckets.append(bucket)
+
+    # print(f'list of buckets: {line_buckets}')
+    # print(len(line_buckets))
+    top_lines = []
+    # print(kde_trial_lower)
+    for bucket, peak in zip(line_buckets, kde_trial_lower):
+        mean_height = np.max([elem.bottom-elem.top for elem in bucket])
+        top_line = peak - mean_height
+        top_lines.append(top_line)
+
+    bottom_lines = kde_trial_lower
+    top_lines.sort()
+    bottom_lines.sort()
+
+    return (top_lines, bottom_lines)
 

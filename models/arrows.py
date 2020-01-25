@@ -76,7 +76,10 @@ class SolidArrow(BaseArrow):
         self.prod_side = None
         try:
             self.get_direction()  # Assign self.read_side and self.prod_side
-            if abs(len(self.react_side) - len(self.prod_side)) < 5:
+            if abs(len(self.react_side) - len(self.prod_side)) < 2:
+                log.info('Detected line is not an arrow')
+                raise NotAnArrowException
+            elif abs(len(self.react_side) - len(self.prod_side)) < 5:
                 log.warning('Difficulty detecting arrow sides - low pixel majority')
         except NotAnArrowException:
             raise
