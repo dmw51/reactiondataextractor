@@ -4,6 +4,7 @@ import math
 import numpy as np
 
 from scipy import ndimage as ndi
+from scipy.ndimage import label
 from scipy.ndimage import binary_closing
 from skimage.measure import regionprops
 from skimage.morphology import disk, skeletonize
@@ -11,7 +12,7 @@ from skimage.transform import probabilistic_hough_line
 from skimage.util import pad
 from skimage.util import crop as crop_skimage
 
-from scipy.ndimage import label
+
 from models.utils import Line, Point
 from models.segments import Rect, Panel, Figure
 
@@ -338,14 +339,17 @@ def intersect_rectangles(rect1, rect2):
     bottom = min(rect1.bottom, rect2.bottom)
     return Rect(left, right, top, bottom)
 
-def belongs_to_textline(cropped_img, panel, textline):
+def belongs_to_textline(cropped_img, panel, textline,threshold=0.7):
     """
     Return True if a panel belongs to a textline, False otherwise.
-    :param cropped_img: image cropped around text elements
+    :param np.ndarray cropped_img: image cropped around text elements
     :param Panel panel: Panel containing connected component to check
     :param Panel textline: Panel containing the textline
+    :param float threshold: threshold for assigning a cc to a textline, ratio of on-pixels in a cc
+                            contained within the line
     :return: bool True if panel lies on the textline
     """
+
     #print('running belongs to textline!')
     if textline.contains(panel): #if textline covers the panel completely
         return True
@@ -359,17 +363,17 @@ def belongs_to_textline(cropped_img, panel, textline):
                       shared_space.left:shared_space.right]
 
     shared_text_pixels = np.count_nonzero(cropped_element)
-    if shared_text_pixels/text_pixels > 0.75:
+    if shared_text_pixels/text_pixels > threshold:
         return True
 
     return False
 
 
 def is_boundary_cc(img, cc):
-    if cc.left == 0 or cc.top == 0:
+    if cc.left == 0:
         return True
 
-    if cc.right == img.shape[1] or cc.bottom == img.shape[0]:
+    if cc.right == img.shape[1]:
         return True
 
     return False
@@ -403,6 +407,30 @@ def find_textline_threshold(img,hist_bins):
 
     def find_textlines_k_means(panels):
         pass
+
+def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
+    """
+    Used to detect small characters - eg subscripts, which have less stringent threshold criteria
+    :param np.ndarray cropped_img: image cropped around condition text elements
+    :param Panel cc: any connected component
+    :param float mean_character_area: mean connected component area in `cropped_img`
+    :param Panel textline: Panel containing a text line
+    :return: bool True if a small character, False otherwise
+    """
+    crop_area = cropped_img.shape[0] * cropped_img.shape[1]
+    #print(f'area: {crop_area}')
+    if cc.area < 0.7 * mean_character_area:
+        #print(f'satisfied area criterion!')
+        if belongs_to_textline(cropped_img, cc, textline, threshold=0.4):
+            #print('satisifies thresholding?')
+            return True
+
+    return False
+
+
+
+
+
 
 
 

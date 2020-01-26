@@ -10,8 +10,9 @@ from scipy.signal import find_peaks
 from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize as skeletonize_skimage
 from skimage.measure import regionprops
+from sklearn.cluster import DBSCAN
 from sklearn.neighbors import KernelDensity
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.model_selection import GridSearchCV
 
 from config import get_area
@@ -22,6 +23,7 @@ from models.segments import Rect, Panel, Figure
 from models.utils import Point, Line
 from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill, pad
 from utils.processing import binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, belongs_to_textline, is_boundary_cc, find_textline_threshold
+from utils.processing import is_small_textline_character
 import cv2
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -183,27 +185,34 @@ def find_reaction_conditions(fig, arrow, panels, global_skel_pixel_ratio,stepsiz
     :param float global_skel_pixel_ratio: value describing density of on-pixels in a graph
     :param int stepsize: integer value decribing size of step between two line scanning operations
     """
+    panels = [panel for panel in panels if panel.area < 55**2]
     arrow = copy.deepcopy(arrow)
     sorted_pts_col = sorted(arrow.line,key= lambda pt: pt.col)
     p1, p2 = sorted_pts_col[0], sorted_pts_col[-1]
     #'Squeeze the two points in the second dimension to avoid overlap with structures on either side
 
     overlapped = set()
+    rows = []
+    columns = []
     for direction in range(2):
         boredom_index = 0 #increments if no overlaps found. if nothing found in 5 steps,
         # the algorithm breaks from a loop
         increment = (-1) ** direction
         p1_scancol, p2_scancol = p1.col, p2.col
         p1_scanrow, p2_scanrow = p1.row, p2.row
+
         for step in range(steps):
             #Reduce the scanned area proportionally to distance from arrow
-            p1_scancol = int(p1_scancol * 1.05) # These changes dont work as expected - need to check them
-            p2_scancol = int(p2_scancol * 0.9)
+            p1_scancol = int(p1_scancol * 1.01) # These changes dont work as expected - need to check them
+            p2_scancol = int(p2_scancol * .99)
 
             #print('p1: ',p1_scanrow,p1.col)
             #print('p2: ', p2_scanrow,p2.col)
             p1_scanrow += increment*stepsize
             p2_scanrow += increment*stepsize
+            rows.extend((p1_scanrow, p2_scanrow))
+            columns.extend((p1_scancol, p2_scancol))
+            print(f'approximating between points {p1_scanrow, p1_scancol} and {p2_scanrow, p2_scancol}')
             line = approximate_line(Point(row=p1_scanrow, col=p1_scancol), Point(row=p2_scanrow, col=p2_scancol))
             overlapping_panels = [panel for panel in panels if panel.overlaps(line)]
 
@@ -215,6 +224,12 @@ def find_reaction_conditions(fig, arrow, panels, global_skel_pixel_ratio,stepsiz
 
             if boredom_index >= 5: #Nothing found in the last five steps
                 break
+    print(f'rows: {rows}')
+    print(f'cols: {columns}')
+    plt.imshow(fig.img, cmap=plt.cm.binary)
+    plt.scatter(columns, rows, c='y', s=1)
+    plt.savefig('destination_path.jpg', format='jpg', dpi=1000)
+    plt.show()
 
     conditions_text = scan_conditions_text(fig,overlapped,arrow)
 
@@ -387,7 +402,8 @@ def scan_conditions_text(fig, conditions,arrow):
     """
 
     fig = copy.deepcopy(fig)
-    extended_boundary = 50
+    extended_boundary_vertical = 150
+    extended_boundary_horizontal = 50
     conditions = create_megabox(conditions)
     fig = erase_elements(fig,[arrow])
     raw_conditions_region = crop(fig.img, conditions.left, conditions.right,
@@ -460,17 +476,17 @@ def scan_conditions_text(fig, conditions,arrow):
     #upper = [bottom_textline-mean_height for bottom_textline in lower]
     # TODO: Make sure there is equal number of upper and lower lines and that they have approximately consistent height
     print(f'lower before transformation: {lower}')
-    search_region = Rect(conditions.left-extended_boundary, conditions.right+extended_boundary,
-               conditions.top-extended_boundary, conditions.bottom+extended_boundary)
+    search_region = Rect(conditions.left-extended_boundary_horizontal, conditions.right+extended_boundary_horizontal,
+               conditions.top-extended_boundary_vertical, conditions.bottom+extended_boundary_vertical)
     print(f'search region: {search_region}')
     crop_dct = crop(fig.img, search_region.left, search_region.right, search_region.top, search_region.bottom)
     roi = crop_dct['img']
-    roi = binary_close(Figure(roi),1)
-    roi = roi.img
+    #roi = binary_close(Figure(roi),1)
+    #roi = roi.img
     boundaries = crop_dct['rectangle'] #This is necessary in case a smaller area is cropped
     print(f'actual boundaries :{boundaries}')
     #Move lines to the new extended region
-    vertical_shift = extended_boundary if search_region.top > 0 else conditions.top #if still within the image after expansion,
+    vertical_shift = extended_boundary_vertical if search_region.top > 0 else conditions.top #if still within the image after expansion,
     # then choose the extended boundary, else the shift is the distance from top as crop cannot goe beyond 0
     # print(f'horizontal, vertical: {horizontal_shift, vertical_shift}')
     lower = [row+vertical_shift-p for row in lower]
@@ -496,24 +512,50 @@ def scan_conditions_text(fig, conditions,arrow):
     #print(textlines)
 
     f, ax = plt.subplots()
-    plt.imshow(roi)
+
     for panel in textlines:
-       rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='g',edgecolor='b')
+       rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='g',edgecolor='b',alpha=0.7)
        ax.add_patch(rect_bbox)
 
     labelled = binary_tag(Figure(roi))
+    ax.imshow(labelled.img)
     ccs = get_bounding_box(labelled)
-    text_candidates =[]
+    mean_character_area = np.average([cc.area for cc in ccs])
+    text_candidate_buckets =[]
     # print(f'textlines: {textlines}')
     # ax.imshow(roi)
-    for cc in ccs:
-        if any(belongs_to_textline(roi,cc,textline) for textline in textlines):
-            text_candidates.append(cc)
-    text_candidates = [cc for cc in text_candidates if not is_boundary_cc(roi,cc)]
-    for panel in text_candidates:
-        rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
-        ax.add_patch(rect_bbox)
+    for textline in textlines:
+        textline_text_candidates = []
+
+        for cc in ccs:
+            # if belongs_to_textline(roi,cc,textline):
+            if textline.overlaps(cc):
+                textline_text_candidates.append(cc)
+
+            # elif is_small_textline_character(roi,cc,mean_character_area,textline):
+            #     if cc not in textline_text_candidates: #avoid doubling
+            #         textline_text_candidates.append(cc)
+
+        textline_text_candidates = filter_distant_text_character(textline_text_candidates,textline)
+        text_candidate_buckets.append(textline_text_candidates)
+
+    colors =['g','r','b','m','w','y','k','r','g']
+    c=-1
+    for textline in text_candidate_buckets:
+        c+=1
+        for panel in textline:
+            rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+                                  facecolor='none', edgecolor=colors[c])
+            ax.add_patch(rect_bbox)
     plt.show()
+    print(f'textline buckets: {text_candidate_buckets}')
+    text_candidates = [element for textline in text_candidate_buckets for element in textline]
+    print(f'text candidates: {text_candidates}' )
+    #text_candidates = [cc for cc in text_candidates if not is_boundary_cc(roi,cc)]
+    # for panel in text_candidates:
+    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
+    #     ax.add_patch(rect_bbox)
+    # plt.show()
     # TODO: Add another condition that entire original cc is in the crop
 
     #Transform boxes back into the main image coordinate system
@@ -524,7 +566,6 @@ def scan_conditions_text(fig, conditions,arrow):
         p = Panel(left=boundaries.left+element.left, right=boundaries.left+element.left+width,
                            top=boundaries.top+element.top, bottom=boundaries.top+element.top+height)
         text_elements.append(p)
-
     return text_elements
 
 def identify_textlines(ccs,raw_cond):
@@ -535,9 +576,10 @@ def identify_textlines(ccs,raw_cond):
     # bottom_count = Counter({value:count for value, count in bottom_count.items() if count>1})
     bottom_boundaries = np.array([item for item in bottom_count.elements()]).reshape(-1, 1)
 
+    little_data = len(ccs) < 10
     grid = GridSearchCV(KernelDensity(),
                         {'bandwidth': np.linspace(0.005, 2.0, 100)},
-                        cv=5)  # 20-fold cross-validation
+                        cv=(len(ccs) if little_data else 10))  # 20-fold cross-validation
     grid.fit(bottom_boundaries)
     best_bw = grid.best_params_['bandwidth']
     kde = KernelDensity(best_bw, kernel='exponential')
@@ -557,6 +599,8 @@ def identify_textlines(ccs,raw_cond):
     kde_trial_lower, _ = find_peaks(logp, distance=mean_height)
     kde_trial_lower.sort()
     plt.plot(rows, logp)
+    plt.xlabel('Row')
+    plt.ylabel('logP(textline)')
     plt.scatter(kde_trial_lower, [0 for elem in kde_trial_lower])
     plt.show()
     line_buckets = []
@@ -578,4 +622,42 @@ def identify_textlines(ccs,raw_cond):
     bottom_lines.sort()
 
     return (top_lines, bottom_lines)
+
+def filter_distant_text_character(ccs, textline):
+    data = np.array([cc.center for cc in ccs]).reshape(-1,2)
+    char_size = np.max([cc.diagonal_length for cc in ccs])
+
+    db = DBSCAN(eps=2*char_size, min_samples=3,metric='minkowski', p=4).fit(data)
+    labels = db.labels_
+    n_labels = len(set(labels)) - (1 if -1 in labels else 0)
+    n_noise = list(labels).count(-1)
+    print(f'number of noise ccs detected: {n_noise}')
+    print(f'number of detected_clusters: {n_labels}')
+    print(f'number of original ccs: {len(ccs)}')
+
+    import matplotlib.pyplot as plt
+    core_samples_mask = np.zeros_like(db.labels_, dtype=bool)
+    core_samples_mask[db.core_sample_indices_] = True
+    # Black removed and is used for noise instead.
+    unique_labels = set(labels)
+    # colors = [plt.cm.Spectral(each)
+    #           for each in np.linspace(0, 1, len(unique_labels))]
+    # for k, col in zip(unique_labels, colors):
+    #     if k == -1:
+    #         # Black used for noise.
+    #         col = [0, 0, 0, 1]
+    #
+    #     class_member_mask = (labels == k)
+    #
+    #     xy = data[class_member_mask & core_samples_mask]
+    #     plt.plot(xy[:, 0], [0 for elem in xy[:,0]], 'o', markerfacecolor=tuple(col),
+    #              markeredgecolor='k', markersize=14)
+    #
+    #     xy = data[class_member_mask & ~core_samples_mask]
+    #     plt.plot(xy[:, 0], [0 for elem in xy[:,0]], 'o', markerfacecolor=tuple(col),
+    #              markeredgecolor='k', markersize=6)
+    #
+    # plt.show()
+
+    return [cc for cc, label in zip(ccs,labels) if label !=-1]
 

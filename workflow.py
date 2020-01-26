@@ -33,9 +33,11 @@ logger.addHandler(ch)
 
 PATH = os.path.join('C:/', 'Users', 'wilar', 'PycharmProjects', 'RDE', 'images', 'RDE_images', 'Easy', 'high_res')
 # for file in os.listdir(PATH):
-filename = '10.1021_jacs.9b12546_1.jpg'
+filename = '10.1021_jacs.9b12546_3.jpg'
 p = os.path.join(PATH, filename)
 fig = imread(p)
+plt.imshow(fig.img,cmap=plt.cm.binary)
+plt.savefig('original.jpg', format='jpg', dpi=1000)
 fig = preprocessing_remove_long_lines(fig)
 labelled = binary_tag(copy.deepcopy(fig))
 initial_ccs = get_bounding_box(labelled)
@@ -48,13 +50,15 @@ for arrow in arrows:
 #print('conditions ccs:', all_conditions)
 fig_noarrows = erase_elements(fig, arrows)
 fig_noconditions = erase_elements(fig_noarrows, *all_conditions)
-plt.imshow(fig_noconditions.img)
+plt.imshow(fig_noconditions.img,cmap=plt.cm.binary)
+#plt.savefig('cleaned.jpg', format='jpg', dpi=1000)
 plt.show()
 ccs = segment(fig_noconditions, arrows)
 steps = scan_all_reaction_steps(fig, arrows, all_conditions, ccs, global_skel_pixel_ratio)
 f, ax = plt.subplots()
 ax.imshow(fig.img,cmap=plt.cm.binary)
 # ax.set_title(filename)
+
 for panel in ccs:
     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
     ax.add_patch(rect_bbox)
