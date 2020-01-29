@@ -31,12 +31,12 @@ ch.setFormatter(formatter)
 logger.addHandler(ch)
 
 
-PATH = os.path.join('C:/', 'Users', 'wilar', 'PycharmProjects', 'RDE', 'images', 'RDE_images', 'Easy', 'high_res')
+PATH = os.path.join('C:/', 'Users', 'wilar', 'PycharmProjects', 'RDE', 'images', 'RDE_images', 'Easy','high_res')
 # for file in os.listdir(PATH):
-filename = '10.1021_jacs.9b12546_3.jpg'
+filename = '10.1021_jacs.9b12899_1.jpg'
 p = os.path.join(PATH, filename)
 fig = imread(p)
-plt.imshow(fig.img,cmap=plt.cm.binary)
+#plt.imshow(fig.img,cmap=plt.cm.binary)
 plt.savefig('original.jpg', format='jpg', dpi=1000)
 fig = preprocessing_remove_long_lines(fig)
 labelled = binary_tag(copy.deepcopy(fig))
@@ -50,41 +50,41 @@ for arrow in arrows:
 #print('conditions ccs:', all_conditions)
 fig_noarrows = erase_elements(fig, arrows)
 fig_noconditions = erase_elements(fig_noarrows, *all_conditions)
-plt.imshow(fig_noconditions.img,cmap=plt.cm.binary)
-#plt.savefig('cleaned.jpg', format='jpg', dpi=1000)
-plt.show()
+# plt.imshow(fig_noconditions.img,cmap=plt.cm.binary)
+# #plt.savefig('cleaned.jpg', format='jpg', dpi=1000)
+# plt.show()
 ccs = segment(fig_noconditions, arrows)
 steps = scan_all_reaction_steps(fig, arrows, all_conditions, ccs, global_skel_pixel_ratio)
-f, ax = plt.subplots()
-ax.imshow(fig.img,cmap=plt.cm.binary)
-# ax.set_title(filename)
-
-for panel in ccs:
-    rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
-    ax.add_patch(rect_bbox)
-
-for panel in arrows:
-    rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='g')
-    ax.add_patch(rect_bbox)
-offset = -3
-for step in steps:
-    conditions = step.conditions.connected_components
-    raw_reacts = step.reactants.connected_components
-    raw_prods = step.products.connected_components
-
-    for panel in conditions:
-        rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
-        ax.add_patch(rect_bbox)
-
-    for panel in raw_reacts:
-        rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
-        ax.add_patch(rect_bbox)
-
-    for panel in raw_prods:
-        rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
-        ax.add_patch(rect_bbox)
-    offset += 3
-plt.show()
+# f, ax = plt.subplots()
+# ax.imshow(fig.img,cmap=plt.cm.binary)
+# # ax.set_title(filename)
+#
+# for panel in ccs:
+#     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
+#     ax.add_patch(rect_bbox)
+#
+# for panel in arrows:
+#     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='g')
+#     ax.add_patch(rect_bbox)
+# offset = -3
+# for step in steps:
+#     conditions = step.conditions.connected_components
+#     raw_reacts = step.reactants.connected_components
+#     raw_prods = step.products.connected_components
+#
+#     for panel in conditions:
+#         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
+#         ax.add_patch(rect_bbox)
+#
+#     for panel in raw_reacts:
+#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
+#         ax.add_patch(rect_bbox)
+#
+#     for panel in raw_prods:
+#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
+#         ax.add_patch(rect_bbox)
+#     offset += 3
+# plt.show()
     # for panel in unclassified:
     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='k')
     #     ax.add_patch(rect_bbox)

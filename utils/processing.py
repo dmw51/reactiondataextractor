@@ -41,6 +41,18 @@ def crop(img, left=None, right=None, top=None, bottom=None):
     out_img = img[top: bottom, left: right]
     return {'img':out_img, 'rectangle':Rect(left,right,top,bottom)}
 
+def crop_rect(img, rect_boundary):
+    """
+    A convenience crop function that crops an image given boundaries as a Rect object
+    :param np.ndarray img: input image
+    :param Rect rect_boundary: object containing boundaries of the crop
+    :return: cropped image
+    :rtype: np.ndarray
+    """
+    left, right = rect_boundary.left, rect_boundary.right
+    top, bottom = rect_boundary.top, rect_boundary.bottom
+    return crop(img, left, right, top, bottom)
+
 
 def binary_close(fig, size=5):
     """ Joins unconnected pixel by dilation and erosion"""
@@ -106,6 +118,7 @@ def erase_elements(fig, *elements):
     fig= copy.deepcopy(fig)
     if isinstance(elements, Container):
         elements = [single_elem for cont in elements for single_elem in cont]
+
     try:
         flattened = fig.img.flatten()
         for element in elements:
@@ -113,6 +126,7 @@ def erase_elements(fig, *elements):
             np.put(flattened, [x * fig.img.shape[1] + y for x, y in element.pixels], 0)
         img_no_elements = flattened.reshape(fig.img.shape[0], fig.img.shape[1])
         fig.img = img_no_elements
+
     except AttributeError:
         for element in elements:
             #print(f'elements: {element}')
@@ -304,6 +318,7 @@ def postprocessing_close_merge(fig, to_close):
     panels = get_bounding_box(labelled)
     return panels
 
+
 def preprocessing_remove_long_lines(fig):
     """
     Remove long line separators from an image to improve image closing algorithm
@@ -325,6 +340,7 @@ def preprocessing_remove_long_lines(fig):
         long_lines_list.append(Line(pixels=line_pixels))
 
     return erase_elements(fig, long_lines_list)
+
 
 def intersect_rectangles(rect1, rect2):
     """
@@ -378,6 +394,7 @@ def is_boundary_cc(img, cc):
 
     return False
 
+
 def find_textline_threshold(img,hist_bins):
     skel_region = skeletonize(img)
     lines  = np.mean(skel_region,axis=1)
@@ -408,6 +425,7 @@ def find_textline_threshold(img,hist_bins):
     def find_textlines_k_means(panels):
         pass
 
+
 def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
     """
     Used to detect small characters - eg subscripts, which have less stringent threshold criteria
@@ -419,13 +437,58 @@ def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
     """
     crop_area = cropped_img.shape[0] * cropped_img.shape[1]
     #print(f'area: {crop_area}')
-    if cc.area < 0.7 * mean_character_area:
+    if cc.area < 0.9 * mean_character_area:
         #print(f'satisfied area criterion!')
-        if belongs_to_textline(cropped_img, cc, textline, threshold=0.4):
+        if belongs_to_textline(cropped_img, cc, textline, threshold=0.5):
             #print('satisifies thresholding?')
             return True
 
     return False
+
+
+def transform_panel_coordinates_to_parent(crop_rect, parent_rect, ccs, absolute=False):
+    """
+    Change coordinates of panels in a crop back to the parent frame of reference.
+    :param Rect crop_rect: original system where the panel was detected
+    :param Rect parent_rect: a larger part of an image, where a crop was formed
+    :param iterable of Panels ccs: iterable of Panel objects to be transformed into the new coordinate system
+    :param bool absolute: True if the `parent_panel` coordinates are expressed in global coordinates,
+    False if expressed in the `in_crop_panel` coordinates. False by default
+    :return: list of new, mapped panels
+    """
+    new_panels = []
+    if absolute:
+        for cc in ccs:
+            height = cc.bottom - cc.top
+            width = cc.right - cc.left
+
+            new_top = cc.top + (crop_rect.top - parent_rect.top)
+            new_bottom = new_top + height
+
+            new_left = cc.left + (crop_rect.left - parent_rect.left)
+            new_right = new_left + width
+            new_panels.append(Panel(left=new_left,right=new_right,
+                                    top=new_top, bottom=new_bottom))
+
+    else:
+        for cc in ccs:
+            height = cc.bottom - cc.top
+            width = cc.right - cc.left
+
+            new_left = cc.left + crop_rect.left
+            new_right = new_left + width
+
+            new_top = cc.top + crop_rect.top
+            new_bottom = new_top + height
+
+            new_panels.append(Panel(left=new_left, right=new_right,
+                                    top=new_top, bottom=new_bottom))
+
+    return new_panels
+
+
+
+
 
 
 
