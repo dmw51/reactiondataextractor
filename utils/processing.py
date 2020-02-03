@@ -14,7 +14,7 @@ from skimage.util import crop as crop_skimage
 
 
 from models.utils import Line, Point
-from models.segments import Rect, Panel, Figure
+from models.segments import Rect, Panel, Figure, TextLine
 
 
 
@@ -107,7 +107,14 @@ def binary_tag(fig):
     fig.img, no_tagged = ndi.label(fig.img)
     return fig
 
-
+def label_and_get_ccs(fig):
+    """
+    Convenience function that tags ccs in an image and creates their Panels
+    :param Figure fig: Input Figure
+    :return set: set of Panels of connected components
+    """
+    labelled = binary_tag(fig)
+    return get_bounding_box(labelled)
 
 def erase_elements(fig, *elements):
     """
@@ -360,7 +367,7 @@ def belongs_to_textline(cropped_img, panel, textline,threshold=0.7):
     Return True if a panel belongs to a textline, False otherwise.
     :param np.ndarray cropped_img: image cropped around text elements
     :param Panel panel: Panel containing connected component to check
-    :param Panel textline: Panel containing the textline
+    :param TextLine textline: Textline against which the panel is compared
     :param float threshold: threshold for assigning a cc to a textline, ratio of on-pixels in a cc
                             contained within the line
     :return: bool True if panel lies on the textline
@@ -395,37 +402,6 @@ def is_boundary_cc(img, cc):
     return False
 
 
-def find_textline_threshold(img,hist_bins):
-    skel_region = skeletonize(img)
-    lines  = np.mean(skel_region,axis=1)
-    hist_range = (hist_bins[0], hist_bins[-1])
-    test_thresh = np.linspace(hist_range[0],hist_range[1],20)
-    print('step:', test_thresh)
-    lower_textlinelines_numbers =[]
-    dist=[]
-    thresh = hist_range[0]
-    for thresh in test_thresh:
-        lower = [idx for idx in range(1,len(lines)-1) if lines[idx] <=thresh and lines[idx-1] > thresh]
-        upper = [idx for idx in range(1,len(lines)-1) if lines[idx]  > thresh and lines[idx-1] <= thresh]
-        lower_textlinelines_numbers.append((len(lower),len(upper)))
-        lower.sort()
-        upper.sort()
-        dist.append([l-u for l,u in zip(lower,upper)])
-        print('thresh:', thresh)
-
-    print(f'numbers: {lower_textlinelines_numbers}')
-    print(f'distance: {dist}')
-    #Look at the change in number of textlines
-    change=[]
-    for i in range(len(lower)-1):
-        change_lower = lower_textlinelines_numbers[i+1] - lower_textlinelines_numbers[i]
-        change.append(change_lower)
-    print('change:', change)
-
-    def find_textlines_k_means(panels):
-        pass
-
-
 def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
     """
     Used to detect small characters - eg subscripts, which have less stringent threshold criteria
@@ -446,11 +422,11 @@ def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
     return False
 
 
-def transform_panel_coordinates_to_parent(crop_rect, parent_rect, ccs, absolute=False):
+def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, absolute=False):
     """
     Change coordinates of panels in a crop back to the parent frame of reference.
     :param Rect crop_rect: original system where the panel was detected
-    :param Rect parent_rect: a larger part of an image, where a crop was formed
+    :param Rect expanded_rect: a larger part of an image, where a crop was formed
     :param iterable of Panels ccs: iterable of Panel objects to be transformed into the new coordinate system
     :param bool absolute: True if the `parent_panel` coordinates are expressed in global coordinates,
     False if expressed in the `in_crop_panel` coordinates. False by default
@@ -462,10 +438,10 @@ def transform_panel_coordinates_to_parent(crop_rect, parent_rect, ccs, absolute=
             height = cc.bottom - cc.top
             width = cc.right - cc.left
 
-            new_top = cc.top + (crop_rect.top - parent_rect.top)
+            new_top = cc.top + (crop_rect.top - expanded_rect.top)
             new_bottom = new_top + height
 
-            new_left = cc.left + (crop_rect.left - parent_rect.left)
+            new_left = cc.left + (crop_rect.left - expanded_rect.left)
             new_right = new_left + width
             new_panels.append(Panel(left=new_left,right=new_right,
                                     top=new_top, bottom=new_bottom))
@@ -487,7 +463,26 @@ def transform_panel_coordinates_to_parent(crop_rect, parent_rect, ccs, absolute=
     return new_panels
 
 
+def transform_panel_coordinates_to_shrunken_region(cropped_region, ccs):
 
+    if not isinstance(ccs, Container): # This is just for convenience
+        ccs = [ccs]
+
+    new_panels =[]
+    for cc in ccs:
+        height = cc.bottom - cc.top
+        width = cc.right - cc.left
+
+        new_left = cc.left - cropped_region.left
+        new_right = new_left + width
+
+        new_top = cc.top - cropped_region.top
+        new_bottom = new_top + height
+
+        new_panels.append(Panel(left=new_left, right=new_right,
+                                top=new_top, bottom=new_bottom))
+
+    return new_panels
 
 
 

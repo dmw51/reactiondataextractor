@@ -11,7 +11,7 @@ from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize as skeletonize_skimage
 from skimage.morphology import binary_dilation, disk
 from skimage.measure import regionprops
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, KMeans
 from sklearn.neighbors import KernelDensity
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.model_selection import GridSearchCV
@@ -20,11 +20,12 @@ from config import get_area
 from models.arrows import SolidArrow
 from models.exceptions import NotAnArrowException
 from models.reaction import ReactionStep,Conditions,Reactant,Product,Intermediate
-from models.segments import Rect, Panel, Figure
+from models.segments import Rect, Panel, Figure, TextLine
 from models.utils import Point, Line
 from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill, pad
-from utils.processing import binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, belongs_to_textline, is_boundary_cc, find_textline_threshold
-from utils.processing import is_small_textline_character, crop_rect, transform_panel_coordinates_to_parent
+from utils.processing import binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, belongs_to_textline, is_boundary_cc
+from utils.processing import is_small_textline_character, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region
+from utils.processing import label_and_get_ccs
 import cv2
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -232,7 +233,7 @@ def find_reaction_conditions(fig, arrow, panels, global_skel_pixel_ratio,stepsiz
     # plt.savefig('destination_path.jpg', format='jpg', dpi=1000)
     # plt.show()
 
-    conditions_text = scan_conditions_text(fig,overlapped,arrow)
+    conditions_text = scan_conditions_text2(fig,overlapped,arrow)
 
     return set(conditions_text) #Return as a set to allow handling along with product and reactant sets
 
@@ -413,12 +414,15 @@ def scan_conditions_text(fig, conditions,arrow):
 
     p = 5 #padding amount
     raw_conditions_region = pad(raw_conditions_region,[(p,p),(p,p)],'constant',constant_values=0)
+
     padded_conditions = Rect(conditions.left - p, conditions.right + p,
                              conditions.top - p, conditions.bottom + p)
     #raw_conditions_region = binary_close(Figure(raw_conditions_region),1).img
     labelled = binary_tag(Figure(raw_conditions_region))
     ccs = get_bounding_box(labelled)
+
     upper, lower = identify_textlines(ccs,raw_conditions_region)
+
     initial_ccs_transformed = []
     #upper = [bottom_textline-mean_height for bottom_textline in lower]
 
@@ -443,7 +447,7 @@ def scan_conditions_text(fig, conditions,arrow):
     upper = [row+vertical_shift-p for row in upper]
 
 
-    initial_ccs_transformed = transform_panel_coordinates_to_parent(padded_conditions,boundaries,ccs,absolute=True)
+    initial_ccs_transformed = transform_panel_coordinates_to_expanded_rect(padded_conditions,boundaries,ccs,absolute=True)
     print(f'the new boundaries: {boundaries}')
 
 
@@ -460,7 +464,7 @@ def scan_conditions_text(fig, conditions,arrow):
 
     upper.sort()
     lower.sort()
-    textlines = [Panel(left=0, right=roi.shape[1],top=top_line, bottom=bottom_line)
+    textlines = [TextLine(left=0, right=roi.shape[1],top=top_line, bottom=bottom_line)
                  for top_line, bottom_line in zip(upper,lower)]
     #print('textlines:...')
     #print(textlines)
@@ -474,31 +478,57 @@ def scan_conditions_text(fig, conditions,arrow):
 
 
     ccs = set(get_bounding_box(labelled))
-    small_characters = find_small_characters(roi, ccs)
-    ccs = ccs.difference(small_characters)
+    # small_characters = find_small_characters(roi, ccs)
+    # ccs = ccs.difference(small_characters)
     mean_character_area = np.average([cc.area for cc in ccs])
     text_candidate_buckets =[]
     # print(f'textlines: {textlines}')
+
+
+    text_candidate_buckets = assign_characters_to_textlines(roi.img,textlines, ccs)
+
+
+
+    text_candidates = [element for textline in text_candidate_buckets for element in textline]
+    # print(f'text candidates: {text_candidates}' )
+    text_elements = [cc for cc in text_candidates if not is_boundary_cc(roi.img,cc)]
+
+    # Find unclassified characters
+    remaining_elements = set(ccs).difference(text_elements)
+
+
+    to_filter_out = set()
+    for element in remaining_elements:
+
+        assigned = attempt_assign_to_nearest_text_element(roi, element, mean_character_area)
+        if assigned:
+            print(f'assigned: {assigned}')
+            small_cc, assigned_closest_cc = assigned
+
+            for textline_elements in text_candidate_buckets :
+                if assigned_closest_cc in textline_elements:
+                    to_filter_out.add(small_cc)
+                    textline_elements.append(small_cc)
+                    print(f'after adding: {textline_elements}')
+    remaining_elements = remaining_elements.difference(to_filter_out)
+
+    additional_detected_textlines = attempt_fit_textline(roi, textlines)
+    print(f'additional textlines: {additional_detected_textlines}')
+    if additional_detected_textlines:
+        text_candidate_buckets.extend(additional_detected_textlines)
+    text_elements = [element for textline in text_candidate_buckets for element in textline]
     # f, ax = plt.subplots()
     # ax.imshow(roi.img)
+    # ax.set_title('remaining elements')
+    # for panel in remaining_elements:
+    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+    #                           facecolor='none', edgecolor='y')
+    #     ax.add_patch(rect_bbox)
+    # plt.show()
 
-
-    for textline in textlines:
-        textline_text_candidates = []
-
-        for cc in ccs:
-            if belongs_to_textline(roi.img,cc,textline):
-            # if textline.overlaps(cc):
-                textline_text_candidates.append(cc)
-
-            # elif is_small_textline_character(roi,cc,mean_character_area,textline):
-            #     if cc not in textline_text_candidates: #avoid doubling
-            #         textline_text_candidates.append(cc)
-
-        textline_text_candidates = filter_distant_text_character(textline_text_candidates,textline)
-        text_candidate_buckets.append(textline_text_candidates)
-
-    # colors =['g','r','b','m','w','y','k','r','g']
+    # f, ax = plt.subplots()
+    # ax.imshow(roi.img)
+    # colors =['g','r','b','m','w','y','k','r','g','b','m']*2
     # c=-1
     # for textline in text_candidate_buckets:
     #     c+=1
@@ -507,26 +537,27 @@ def scan_conditions_text(fig, conditions,arrow):
     #                               facecolor='none', edgecolor=colors[c])
     #         ax.add_patch(rect_bbox)
     # print(f'textline buckets: {text_candidate_buckets}')
-    text_candidates = [element for textline in text_candidate_buckets for element in textline]
-    # print(f'text candidates: {text_candidates}' )
-    #text_candidates = [cc for cc in text_candidates if not is_boundary_cc(roi,cc)]
-    # for panel in text_candidates:
+    # for panel in text_elements:
     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
     #     ax.add_patch(rect_bbox)
     # plt.show()
     # TODO: Add another condition that entire original cc is in the crop
-
+    text_elements = isolate_full_text_block(text_candidate_buckets)
     #Transform boxes back into the main image coordinate system
-    text_elements =[]
-    for element in text_candidates:
+
+    text_elements_transformed =[]
+    for element in text_elements:
         height = element.bottom - element.top
         width = element.right - element.left
         p = Panel(left=boundaries.left+element.left, right=boundaries.left+element.left+width,
                            top=boundaries.top+element.top, bottom=boundaries.top+element.top+height)
-        text_elements.append(p)
-    return text_elements
+        text_elements_transformed.append(p)
 
-def identify_textlines(ccs,raw_cond):
+
+    return text_elements_transformed
+
+def identify_textlines(ccs,img):
+
     bottom_boundaries = [cc.bottom for cc in ccs]
     bottom_boundaries.sort()
 
@@ -544,41 +575,37 @@ def identify_textlines(ccs,raw_cond):
     kde.fit(bottom_boundaries)
 
     # print(f'params: {kde.get_params()}')
-    rows= np.linspace(0, raw_cond.shape[0], raw_cond.shape[0] + 1)
+    rows= np.linspace(0, img.shape[0], img.shape[0] + 1)
     logp = kde.score_samples(rows.reshape(-1, 1))
 
-    # plt.hist(bottom_boundaries, bins=20, range=[0, raw_cond.shape[0]])
-    # plt.show()
-    # plt.plot(s, e)
-    # plt.show()
 
     heights = [cc.bottom - cc.top for cc in ccs]
     mean_height = np.mean(heights, dtype=np.uint32)
-    kde_trial_lower, _ = find_peaks(logp, distance=mean_height)
-    kde_trial_lower.sort()
-    # plt.plot(rows, logp)
-    # plt.xlabel('Row')
-    # plt.ylabel('logP(textline)')
-    # plt.scatter(kde_trial_lower, [0 for elem in kde_trial_lower])
-    # plt.show()
+    kde_lower, _ = find_peaks(logp, distance=mean_height*1.2)
+    kde_lower.sort()
+    plt.plot(rows, logp)
+    plt.xlabel('Row')
+    plt.ylabel('logP(textline)')
+    plt.scatter(kde_lower, [0 for elem in kde_lower])
+    plt.show()
     line_buckets = []
-    for peak in kde_trial_lower:
+    for peak in kde_lower:
         bucket = [cc for cc in ccs if cc.bottom in range(peak - 3, peak + 3)]
         line_buckets.append(bucket)
 
     # print(f'list of buckets: {line_buckets}')
     # print(len(line_buckets))
     top_lines = []
-    # print(kde_trial_lower)
-    for bucket, peak in zip(line_buckets, kde_trial_lower):
+    # print(kde_lower)
+    for bucket, peak in zip(line_buckets, kde_lower):
         mean_height = np.max([elem.bottom-elem.top for elem in bucket])
         top_line = peak - mean_height
         top_lines.append(top_line)
 
-    bottom_lines = kde_trial_lower
+    bottom_lines = kde_lower
     top_lines.sort()
     bottom_lines.sort()
-
+    #textlines = [TextLine(None,top,bottom) for top, bottom in zip(top_lines,bottom_lines)]
     return (top_lines, bottom_lines)
 
 def filter_distant_text_character(ccs, textline):
@@ -586,21 +613,24 @@ def filter_distant_text_character(ccs, textline):
         return []
 
     data = np.array([cc.center for cc in ccs]).reshape(-1,2)
-    char_size = np.max([cc.diagonal_length for cc in ccs])
+    char_size = np.max([cc.diagonal_length for cc in ccs]) # This is about 25-30 usually
 
-    db = DBSCAN(eps=char_size*2, min_samples=3,metric='minkowski', p=4).fit(data)
-    labels = db.labels_
-    n_labels = len(set(labels)) - (1 if -1 in labels else 0)
-    n_noise = list(labels).count(-1)
+    initial_cluster = np.array(textline.center).reshape(1,-1)
+    db = DBSCAN(eps=char_size*2, min_samples=2).fit(data)
+    db_labels = db.labels_
+
+    # labels = db.labels_
+    # n_labels = len(set(labels)) - (1 if -1 in labels else 0)
+    # n_noise = list(labels).count(-1)
     # print(f'number of noise ccs detected: {n_noise}')
     # print(f'number of detected_clusters: {n_labels}')
     # print(f'number of original ccs: {len(ccs)}')
 
-    import matplotlib.pyplot as plt
-    core_samples_mask = np.zeros_like(db.labels_, dtype=bool)
-    core_samples_mask[db.core_sample_indices_] = True
-    # Black removed and is used for noise instead.
-    unique_labels = set(labels)
+    # import matplotlib.pyplot as plt
+    # core_samples_mask = np.zeros_like(db.labels_, dtype=bool)
+    # core_samples_mask[db.core_sample_indices_] = True
+    # # Black removed and is used for noise instead.
+    # unique_labels = set(labels)
     # colors = [plt.cm.Spectral(each)
     #           for each in np.linspace(0, 1, len(unique_labels))]
     # for k, col in zip(unique_labels, colors):
@@ -619,30 +649,299 @@ def filter_distant_text_character(ccs, textline):
     #              markeredgecolor='k', markersize=6)
     #
     # plt.show()
-
-    return [cc for cc, label in zip(ccs,labels) if label !=-1]
+    # print(f'labels: {db_labels}')
+    return [cc for cc, label in zip(ccs, db_labels) if label == 0]
 
 def attempt_remove_structure_parts(cropped_img, text_ccs):
     crop_no_letters = erase_elements(Figure(cropped_img),text_ccs)
-    f, ax = plt.subplots()
-    ax.imshow(crop_no_letters.img)
-    for panel in text_ccs:
-       rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='g',edgecolor='b',alpha=0.7)
-       ax.add_patch(rect_bbox)
-    ax.set_title('characters removed')
-    plt.show()
-
-    closed = binary_dilation(crop_no_letters.img,selem=disk(3))
+    # f, ax = plt.subplots()
+    # ax.imshow(crop_no_letters.img)
+    # for panel in text_ccs:
+    #    rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='g',edgecolor='b',alpha=0.7)
+    #    ax.add_patch(rect_bbox)
+    # ax.set_title('characters removed')
+    # plt.show()
+    skel_pixel_ratio = skeletonize_area_ratio(Figure(cropped_img),Panel(0,cropped_img.shape[1], 0, cropped_img.shape[0]))
+    print(f'the skel-pixel ratio is {skel_pixel_ratio}')
+    closed = binary_dilation(crop_no_letters.img,selem=disk(4)) #Decide based on skel-pixel ratio
     labelled = binary_tag(Figure(closed))
     ccs = get_bounding_box(labelled)
     structure_parts = [cc for cc in ccs if is_boundary_cc(cropped_img,cc)]
-    cropped_img = erase_elements(Figure(cropped_img),structure_parts)
-    return cropped_img
+    crop_no_structures = erase_elements(Figure(cropped_img),structure_parts)
 
+    # f, ax = plt.subplots()
+    # ax.imshow(crop_no_structures.img)
+    # for panel in text_ccs:
+    #    rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
+    #    ax.add_patch(rect_bbox)
+    # ax.set_title('structures removed')
+    # plt.show()
+
+    return crop_no_structures
+
+
+def assign_characters_to_textlines(img, textlines, ccs, transform_from_crop=False, crop_rect=None):
+    text_candidate_buckets =[]
+    for textline in textlines:
+        textline_text_candidates = []
+
+        for cc in ccs:
+            if belongs_to_textline(img,cc,textline):
+                textline_text_candidates.append(cc)
+
+            # elif is_small_textline_character(roi,cc,mean_character_area,textline):
+            #     if cc not in textline_text_candidates: #avoid doubling
+            #         textline_text_candidates.append(cc)
+
+        textline_text_candidates = filter_distant_text_character(textline_text_candidates,textline)
+        if transform_from_crop:
+            textline_text_candidates = transform_panel_coordinates_to_expanded_rect(
+                crop_rect, Rect(0,0,0,0), textline_text_candidates) #Relative only so a placeholder Rect is the input
+
+        if textline_text_candidates: #If there are any candidates
+            #This is done intentionally for bottom and top crops where there can be leftover bits from main text
+            textline.connected_components = textline_text_candidates
+            print(f'components: {textline.connected_components}')
+            text_candidate_buckets.append(textline)
+
+    return text_candidate_buckets
 def find_small_characters(cropped_figure, ccs,threshold_size=None):
+    # Currently not used
     if threshold_size is None:
         threshold_size = np.mean([cc.area for cc in ccs])/2
 
     small_characters = [cc for cc in ccs if cc.area < threshold_size]
 
     return set(small_characters)
+
+def attempt_assign_to_nearest_text_element(fig, cc, mean_character_area, small_cc=True):
+    """
+    Crops `fig.img` and does a simple proximity search to determine the closest character.
+    :param Figure fig: figure object containing image with the cc panel
+    :param Panel cc: unassigned connected component
+    :param float mean_character_area: average area of character in the main crop
+    :return: tuple (cc, nearest_neighbour) if close enough, else return None (inconclusive search)
+    """
+    mean_character_diagonal = np.sqrt(2 * mean_character_area)
+    expansion = int(2 * mean_character_diagonal)
+    crop_region = Rect(cc.left-expansion, cc.right+expansion, cc.top-expansion, cc.bottom+expansion)
+    cropped_img = crop_rect(fig.img, crop_region)
+    if cropped_img['rectangle'] != crop_region:
+        crop_region = cropped_img['rectangle']
+
+    cropped_img = cropped_img['img']
+    cc_in_shrunken_region = transform_panel_coordinates_to_shrunken_region(crop_region,cc)[0]
+    ccs = label_and_get_ccs(Figure(cropped_img))
+    print(ccs)
+    small_cc = True if cc.area < mean_character_area else False
+
+    if small_cc:
+        print(cc.area)
+        closest_ccs = sorted([(other_cc, other_cc.separation(cc_in_shrunken_region))
+                             for other_cc in ccs if other_cc.area > 1.3 * cc.area], key=lambda elem : elem[1])
+                        #Calculate separation, sort,
+                        # then choose the smallest non-zero (index 1) separation
+    else:
+        closest_ccs = sorted([(other_cc, other_cc.separation(cc_in_shrunken_region))
+                             for other_cc in ccs], key=lambda elem: elem[1])
+
+    if len(closest_ccs) > 1:
+        closest_cc = closest_ccs[1]
+    else:
+        return None
+
+
+    if closest_cc[1] > 2 * mean_character_diagonal:
+        return None # Too far away
+
+    closest_cc_transformed = transform_panel_coordinates_to_expanded_rect(crop_region,fig.img,[closest_cc[0]])[0]
+    return (cc, closest_cc_transformed)
+
+
+
+
+def attempt_fit_textline(cropped_figure, main_textlines):
+    img = cropped_figure.img
+
+    main_textlines_top = np.min([textline.top for textline in main_textlines])
+    main_textlines_bottom = np.max([textline.bottom for textline in main_textlines])
+    mean_main_textline_height = np.mean([textline.height for textline in main_textlines])
+    mean_main_textline_center_horizontal = np.mean([textline.center[0] for textline in main_textlines])
+
+    crop_top_region = Rect(left=0, right=img.shape[1],
+                           top=0, bottom=main_textlines_top)
+
+    crop_bottom_region = Rect(left=0, right=img.shape[1],
+                           top=main_textlines_bottom, bottom=img.shape[0])
+
+    top_text_buckets = fit_textline_locally(cropped_figure,crop_top_region)
+    bottom_text_buckets = fit_textline_locally(cropped_figure, crop_bottom_region)
+    if not (top_text_buckets or bottom_text_buckets):
+        return None
+    print(f'top buckets: {top_text_buckets}')
+    print(bool(top_text_buckets))
+    print(f'bottom buckets: {bottom_text_buckets}')
+    print(bool(bottom_text_buckets))
+    text_candidate_buckets = [*top_text_buckets, *bottom_text_buckets]
+    tolerance = 10 # pixels
+    additional_conditions_text_buckets =[]
+    for bucket in text_candidate_buckets:
+        mean_new_textline_center_horizontal = np.mean([elem.center[0] for elem in bucket])
+        mean_new_textline_height = np.mean([elem.height for elem in bucket])
+        cond1 = abs(mean_new_textline_center_horizontal - mean_main_textline_center_horizontal) <= tolerance
+        cond2 = abs(mean_new_textline_height - mean_main_textline_height) <= tolerance
+        if cond1 and cond2:
+            additional_conditions_text_buckets.append(bucket)
+
+    return additional_conditions_text_buckets
+
+
+    # Perform kmeans with the following features
+    #difference height - mean_textline height?
+    #bottom
+    #varying number of clusters between 1 and 4?
+    #restricting cluster centre to around middle of the line (img.shape[1]//2)
+    height_squared_residuals = np.array([(cc.height - mean_textline_height)**2 for cc in unclassified_ccs]).reshape(-1,1)
+    bottom_boundaries_squared = np.array([cc.bottom**2 for cc in unclassified_ccs]).reshape(-1,1)
+    print(f'bottom boundaries: {bottom_boundaries}')
+    data = np.hstack((height_squared_residuals,bottom_boundaries))
+    print(f'data: {data}')
+
+
+def fit_textline_locally(main_crop, subcrop_region):
+    cropped_region = crop_rect(main_crop.img, subcrop_region)
+    if cropped_region['rectangle'] != subcrop_region:
+        subcrop_region = cropped_region['rectangle']
+
+    cropped_img = cropped_region['img']
+    ccs = label_and_get_ccs(Figure(cropped_img))
+    plt.imshow(cropped_img)
+    plt.title('attempt_fit_textline')
+    plt.show()
+    print(f'ccs: {ccs}')
+    print(f'len ccs: {len(ccs)}')
+    if len(ccs) < 2:
+        return []
+
+    upper, lower = identify_textlines(ccs, cropped_img)
+
+    new_textlines = [TextLine(left=0, right=subcrop_region.right, top=top_line, bottom=bottom_line)
+                     for top_line, bottom_line in zip(upper, lower)]
+    text_candidate_buckets = assign_characters_to_textlines(
+        cropped_img, new_textlines, ccs, transform_from_crop=True,crop_rect=subcrop_region)
+
+    return text_candidate_buckets
+
+
+def filter_textlines_height_criterion(textlines):
+    mean_textline_height = np.mean([textline.height for textline in textlines])
+    tolerance = 10 # pixels
+    cond = [abs(mean_textline_height - textline.height) <= tolerance for textline in textlines]
+    return [textlines[idx] for idx in range(len(textlines)) if cond[idx]]
+
+def filter_textlines_center_criterion(textlines):
+    mean_textline_center_horizontal = np.mean([textline.center[1] for textline in textlines])
+    tolerance = 40 # pixels
+    cond = [abs(mean_textline_center_horizontal - textline.center[1]) <= tolerance for textline in textlines]
+    return [textlines[idx] for idx in range(len(textlines)) if cond[idx]]
+
+def scan_conditions_text2(fig, conditions,arrow):
+    """
+    Crops a larger area around raw conditions to look for additional text elements that have
+    not been correctly recognised as conditions
+    :param Figure fig: analysed figure with binarised image object
+    :param iterable of Panels conditions: set or list of raw conditions (output of `find_reaction_conditions`)
+    :return: Set of Panels containing all recognised conditions
+    """
+
+    fig = copy.deepcopy(fig)
+    fig = erase_elements(fig, [arrow]) # erase arrow at the very beginning
+    extended_boundary_vertical = 150
+    extended_boundary_horizontal = 75
+    conditions_box = create_megabox(conditions)
+
+    search_region = Rect(conditions_box.left-extended_boundary_horizontal, conditions_box.right+extended_boundary_horizontal,
+               conditions_box.top-extended_boundary_vertical, conditions_box.bottom+extended_boundary_vertical)
+    print(f'search region: {search_region}')
+    crop_dct = crop_rect(fig.img, search_region)
+    if crop_dct['rectangle'] != search_region:
+        search_region = crop_dct['img']
+
+    initial_ccs_transformed = transform_panel_coordinates_to_shrunken_region(crop_dct['rectangle'],conditions)
+    search_region = attempt_remove_structure_parts(search_region, initial_ccs_transformed)
+    ccs = label_and_get_ccs(search_region)
+    top_boundaries, bottom_boundaries  = identify_textlines(ccs, search_region.img)
+
+    textlines = [TextLine(0, search_region.img.shape[1], upper, lower)
+                for upper, lower in zip(top_boundaries, bottom_boundaries)]
+
+    f, ax = plt.subplots()
+    ax.imshow(search_region.img)
+    for line in top_boundaries:
+       ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='r')
+    for line in bottom_boundaries:
+       ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='b')
+    plt.show()
+
+
+    print(f'textlines:{textlines}')
+    text_candidate_buckets = assign_characters_to_textlines(search_region.img, textlines, ccs)
+
+    mixed_text_candidates = [element for textline in text_candidate_buckets for element in textline]
+    mean_character_area = np.mean([char.area for char in mixed_text_candidates])
+
+    remaining_elements = set(ccs).difference(mixed_text_candidates)
+
+## New function starts here
+    to_filter_out = set()
+    for element in remaining_elements:
+
+        assigned = attempt_assign_to_nearest_text_element(search_region, element, mean_character_area)
+        if assigned:
+            print(f'assigned: {assigned}')
+            small_cc, assigned_closest_cc = assigned
+
+            for textline in text_candidate_buckets :
+                if assigned_closest_cc in textline:
+                    to_filter_out.add(small_cc)
+                    textline.append(small_cc)
+                    # print(f'after adding: {textline_elements}')
+    remaining_elements = remaining_elements.difference(to_filter_out)
+    ## New function ends here?
+    print(f'buckets: {text_candidate_buckets}')
+    #text_candidate_buckets = filter_textlines_center_criterion(text_candidate_buckets)
+    #text_candidate_buckets = filter_textlines_height_criterion(text_candidate_buckets)
+    print(f'buckets after filtering: {text_candidate_buckets}')
+    # Check if works
+
+    # print(len(all_mixed_text))
+    if len(text_candidate_buckets) > 2:
+        text_candidate_buckets = isolate_full_text_block(text_candidate_buckets, arrow)
+    all_mixed_text = [elem for bucket in text_candidate_buckets for elem in bucket]
+    transformed_mixed_text = transform_panel_coordinates_to_expanded_rect(crop_dct['rectangle'],
+                                                                          Rect(0,0,0,0), all_mixed_text)
+    return transformed_mixed_text
+
+
+
+def isolate_full_text_block(textlines, arrow):
+    for textline in textlines:
+        textline.adjust_left_right()
+    # mixed_text_elements = [elem for textline in text_buckets for elem in textline]
+    mean_textline_height = np.mean([textline.height for textline in textlines])
+    # char_areas = [elem.area for elem in mixed_text_elements]
+    # mean_char_area = np.mean(char_areas)
+    # std_area = np.std(char_areas)
+    # data = np.array([(*elem.center, elem.area) for elem in mixed_text_elements]).reshape(-1,3)
+    data = [textline.center for textline in textlines]
+    data.append(arrow.center)
+    print(data)
+    #center_area_ratio = np.mean(mean_char_area + mean_char_size)
+    # max_r = np.sqrt((mean_char_area+3*std_area)**2 + mean_char_size**2)
+    db = DBSCAN(eps=mean_textline_height*4, min_samples=2).fit(data)
+    labels = db.labels_
+    print(f'labels: {labels}')
+    main_cluster = [textline for textline, label in zip(textlines, labels) if label == 0]
+    print(f'found cluster: {main_cluster}')
+
+    return main_cluster
