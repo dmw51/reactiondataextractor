@@ -4,7 +4,7 @@ import copy
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from utils.io import imread
-from utils.processing import erase_elements, binary_tag, get_bounding_box
+from utils.processing import erase_elements, binary_tag, get_bounding_box, crop_rect, create_megabox
 from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio, find_reaction_conditions)
 from chemschematicresolver.ocr import read_diag_text, read_label
 from models.segments import Figure
@@ -30,7 +30,7 @@ ch.setFormatter(formatter)
 # add ch to logger
 logger.addHandler(ch)
 
-
+all_text =[]
 PATH = os.path.join('C:/', 'Users', 'wilar', 'PycharmProjects', 'RDE', 'images', 'RDE_images', 'Easy', 'high_res')
 lst =[]
 for file in os.listdir(PATH):
@@ -73,8 +73,9 @@ for file in os.listdir(PATH):
         for panel in conditions:
             rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
             ax.add_patch(rect_bbox)
-
+            print(f'conditions panel: {panel}')
         for panel in raw_reacts:
+            print(f'raw reacts panel : {panel}')
             rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
             ax.add_patch(rect_bbox)
 
@@ -83,6 +84,22 @@ for file in os.listdir(PATH):
             ax.add_patch(rect_bbox)
         offset += 3
     plt.show()
+    for conditions in all_conditions:
+        print(f'conditions: {conditions}')
+        for textline in conditions:
+            print(f'textline: {textline}')
+            print(f'connected components: {textline.connected_components}')
+            textline.adjust_left_right()
+            text_block = create_megabox(textline)
+            print(text_block)
+            cropped = crop_rect(fig_noarrows.img, text_block)
+            plt.imshow(cropped['img'], cmap=plt.cm.binary)
+            plt.show()
+
+            text = read_diag_text(fig_noarrows, text_block)
+            all_text.append(text)
+
+print(all_text)
     # for panel in unclassified:
     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='k')
     #     ax.add_patch(rect_bbox)
@@ -112,5 +129,4 @@ for file in os.listdir(PATH):
 #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='b')
 #     ax.add_patch(rect_bbox)
 # plt.show()
-plt.hist(lst)
-plt.show()
+

@@ -254,26 +254,27 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
     for idx,arrow in enumerate(all_arrows):
         ccs_reacts_prods = find_step_reactants_and_products(fig,all_conditions[idx],arrow,all_arrows,panels)
 
-        panels_dict = assign_to_nearest(panels,all_conditions,ccs_reacts_prods['all_ccs_reacts'],ccs_reacts_prods['all_ccs_prods'])
+        panels_dict = assign_to_nearest(panels,ccs_reacts_prods['all_ccs_reacts'],ccs_reacts_prods['all_ccs_prods'])
 
-        control_set.update(*(value for value in panels_dict.values())) # The unpacking looks ugly
+        #control_set.update(*(value for value in panels_dict.values())) # The unpacking looks ugly
 
         conditions = Conditions(connected_components=all_conditions[idx])
         reacts = panels_dict['reactants']
         prods = panels_dict['products']
-        if global_skel_pixel_ratio > 0.02 : #Original kernel size < 6
-            reacts = postprocessing_close_merge(fig, reacts)
-            prods = postprocessing_close_merge(fig, prods)
-            log.debug('Postprocessing closing and merging finished.')
+        print(f'panels_dict: {panels_dict}')
+        # if global_skel_pixel_ratio > 0.02 : #Original kernel size < 6
+        #     reacts = postprocessing_close_merge(fig, reacts)
+        #     prods = postprocessing_close_merge(fig, prods)
+        #     log.debug('Postprocessing closing and merging finished.')
 
         reacts=Reactant(connected_components=reacts)
         prods = Product(connected_components=prods)
         steps.append(ReactionStep(arrow,reacts,prods, conditions))
         #print('panels:', panels)
-    if control_set != panels:
-        log.warning('Some connected components remain unassigned following scan_all_reaction_steps.')
-    else:
-        log.info('All connected components have been assigned following scan_all_reaction steps.')
+    # if control_set != panels:
+    #     log.warning('Some connected components remain unassigned following scan_all_reaction_steps.')
+    # else:
+    #     log.info('All connected components have been assigned following scan_all_reaction steps.')
     return steps
 
 def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrows, panels, stepsize=30):
@@ -363,21 +364,22 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
     log.info('Found the following connected components of prods: %s ' % raw_prods)
     return  {'all_ccs_reacts':raw_reacts, 'all_ccs_prods':raw_prods}
 
-def assign_to_nearest(all_ccs,conditions, reactants, products, threshold=None):
+def assign_to_nearest(all_ccs, reactants, products, threshold=None):
     """
     This postrocessing function takes in all panels and classified panels to perform a set difference.
     It then assings the remaining panels to the appropriate group based on the closest neighbour, subject to a threshold.
     :param iterable all_ccs: list of all connected components excluding arrow
     :param int threshold: maximum distance from nearest neighbour # Not used at this stage. Is it necessary?
-    :param iterable conditions: List of conditions' panels of a reaction step
+    # :param iterable conditions: List of conditions' panels of a reaction step # not used
     :param iterable reactants: List of reactants' panels of a reaction step
     :param iterable products: List of products' panels of a reaction step
     :return dictionary: The modified groups
     """
+    return {'reactants':reactants, 'products':products}
+    #
     log.debug('Assigning connected components based on distance')
     #print('assign: conditions set: ', conditions)
-    conditions_ccs = [cc for inner_set in conditions for cc in inner_set]
-    classified_ccs = set((*conditions_ccs, *reactants, *products))
+    classified_ccs = set((*reactants, *products))
     #print('diagonal lengths: ')
     #print([cc.diagonal_length for cc in classified_ccs])
     threshold = np.mean(([cc.diagonal_length for cc in classified_ccs]))
@@ -544,7 +546,7 @@ def scan_conditions_text(fig, conditions,arrow):
     # TODO: Add another condition that entire original cc is in the crop
     text_elements = isolate_full_text_block(text_candidate_buckets)
     #Transform boxes back into the main image coordinate system
-
+    print(f'text elements: {text_elements}')
     text_elements_transformed =[]
     for element in text_elements:
         height = element.bottom - element.top
@@ -694,12 +696,12 @@ def assign_characters_to_textlines(img, textlines, ccs, transform_from_crop=Fals
             #         textline_text_candidates.append(cc)
 
         textline_text_candidates = filter_distant_text_character(textline_text_candidates,textline)
+        print(f'textline text cands: {textline_text_candidates}')
         if transform_from_crop:
             textline_text_candidates = transform_panel_coordinates_to_expanded_rect(
                 crop_rect, Rect(0,0,0,0), textline_text_candidates) #Relative only so a placeholder Rect is the input
 
         if textline_text_candidates: #If there are any candidates
-            #This is done intentionally for bottom and top crops where there can be leftover bits from main text
             textline.connected_components = textline_text_candidates
             print(f'components: {textline.connected_components}')
             text_candidate_buckets.append(textline)
@@ -833,17 +835,17 @@ def fit_textline_locally(main_crop, subcrop_region):
     return text_candidate_buckets
 
 
-def filter_textlines_height_criterion(textlines):
-    mean_textline_height = np.mean([textline.height for textline in textlines])
-    tolerance = 10 # pixels
-    cond = [abs(mean_textline_height - textline.height) <= tolerance for textline in textlines]
-    return [textlines[idx] for idx in range(len(textlines)) if cond[idx]]
-
-def filter_textlines_center_criterion(textlines):
-    mean_textline_center_horizontal = np.mean([textline.center[1] for textline in textlines])
-    tolerance = 40 # pixels
-    cond = [abs(mean_textline_center_horizontal - textline.center[1]) <= tolerance for textline in textlines]
-    return [textlines[idx] for idx in range(len(textlines)) if cond[idx]]
+# def filter_textlines_height_criterion(textlines):
+#     mean_textline_height = np.mean([textline.height for textline in textlines])
+#     tolerance = 10 # pixels
+#     cond = [abs(mean_textline_height - textline.height) <= tolerance for textline in textlines]
+#     return [textlines[idx] for idx in range(len(textlines)) if cond[idx]]
+#
+# def filter_textlines_center_criterion(textlines):
+#     mean_textline_center_horizontal = np.mean([textline.center[1] for textline in textlines])
+#     tolerance = 40 # pixels
+#     cond = [abs(mean_textline_center_horizontal - textline.center[1]) <= tolerance for textline in textlines]
+#     return [textlines[idx] for idx in range(len(textlines)) if cond[idx]]
 
 def scan_conditions_text2(fig, conditions,arrow):
     """
@@ -886,41 +888,46 @@ def scan_conditions_text2(fig, conditions,arrow):
 
     print(f'textlines:{textlines}')
     text_candidate_buckets = assign_characters_to_textlines(search_region.img, textlines, ccs)
-
+    print(f'example textline ccs: {text_candidate_buckets[0].connected_components}')
     mixed_text_candidates = [element for textline in text_candidate_buckets for element in textline]
-    mean_character_area = np.mean([char.area for char in mixed_text_candidates])
+
 
     remaining_elements = set(ccs).difference(mixed_text_candidates)
-
-## New function starts here
-    to_filter_out = set()
-    for element in remaining_elements:
-
-        assigned = attempt_assign_to_nearest_text_element(search_region, element, mean_character_area)
-        if assigned:
-            print(f'assigned: {assigned}')
-            small_cc, assigned_closest_cc = assigned
-
-            for textline in text_candidate_buckets :
-                if assigned_closest_cc in textline:
-                    to_filter_out.add(small_cc)
-                    textline.append(small_cc)
+    text_candidate_buckets = assign_characters_proximity_search(search_region,
+                                                                remaining_elements, text_candidate_buckets)
+# ## New function starts here
+#     to_filter_out = set()
+#     for element in remaining_elements:
+#
+#         assigned = attempt_assign_to_nearest_text_element(search_region, element, mean_character_area)
+#         if assigned:
+#             print(f'assigned: {assigned}')
+#             small_cc, assigned_closest_cc = assigned
+#
+#             for textline in text_candidate_buckets :
+#                 if assigned_closest_cc in textline:
+#                     to_filter_out.add(small_cc)
+#                     textline.append(small_cc)
                     # print(f'after adding: {textline_elements}')
-    remaining_elements = remaining_elements.difference(to_filter_out)
     ## New function ends here?
     print(f'buckets: {text_candidate_buckets}')
     #text_candidate_buckets = filter_textlines_center_criterion(text_candidate_buckets)
     #text_candidate_buckets = filter_textlines_height_criterion(text_candidate_buckets)
     print(f'buckets after filtering: {text_candidate_buckets}')
-    # Check if works
-
-    # print(len(all_mixed_text))
+    print(f'example textline ccs2: {text_candidate_buckets[0].connected_components}')
     if len(text_candidate_buckets) > 2:
         text_candidate_buckets = isolate_full_text_block(text_candidate_buckets, arrow)
-    all_mixed_text = [elem for bucket in text_candidate_buckets for elem in bucket]
-    transformed_mixed_text = transform_panel_coordinates_to_expanded_rect(crop_dct['rectangle'],
-                                                                          Rect(0,0,0,0), all_mixed_text)
-    return transformed_mixed_text
+    #all_mixed_text = [elem for bucket in text_candidate_buckets for elem in bucket]
+    print(f'buckets: {text_candidate_buckets}')
+
+    transformed_textlines= []
+    for textline in text_candidate_buckets:
+        textline.connected_components = transform_panel_coordinates_to_expanded_rect(crop_dct['rectangle'],
+                                                                          Rect(0,0,0,0), textline.connected_components)
+        transformed_textlines.append(textline)
+
+
+    return transformed_textlines
 
 
 
@@ -945,3 +952,33 @@ def isolate_full_text_block(textlines, arrow):
     print(f'found cluster: {main_cluster}')
 
     return main_cluster
+
+
+def assign_characters_proximity_search(img, chars_to_assign, textlines):
+    """
+    Crops `img` around each of `chars_to_assign` and performs a short-range proximity search. Assigns it to the same
+    group as its nearest neighbours
+    :param img:
+    :param chars_to_assign:
+    :param textlines
+    :return:
+    """
+    mixed_text_ccs = [char for textline in textlines for char in textline]
+    mean_character_area = np.mean([char.area for char in mixed_text_ccs])
+    for element in chars_to_assign:
+        assigned = attempt_assign_to_nearest_text_element(img, element, mean_character_area)
+        if assigned:
+            print(f'assigned: {assigned}')
+            small_cc, assigned_closest_cc = assigned
+
+            for textline in textlines :
+                if assigned_closest_cc in textline:
+                    #to_filter_out.add(small_cc)
+                    textline.append(small_cc)
+
+    #sanity check:
+    # after_assignment = set([elem for textline in textlines for elem in textline])
+    # remaining_elements =  chars_to_assign.difference(after_assignment)
+    # print(f'remaining unassigned elements: {remaining_elements}')
+
+    return textlines

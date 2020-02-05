@@ -25,7 +25,8 @@ class ReactionElement(BaseReactionClass):
     This is a base class for reaction elements found in diagrams (e.g. reactants,conditions and products)
     """
     def __init__(self, connected_components):
-        self.connected_components = remove_small_fully_contained(connected_components)
+        self.connected_components = connected_components
+            #remove_small_fully_contained(connected_components)
 
         # while True:
         #     merged = []

@@ -28,6 +28,7 @@ import logging
 from itertools import product
 import numpy as np
 from models.utils import Line, Point
+# from utils.processing import create_megabox # can't do - circular, to fix.
 
 
 log = logging.getLogger(__name__)
@@ -264,6 +265,9 @@ class TextLine(Panel):
     def __contains__(self, item):
         return item in self.connected_components
 
+    # @property
+    # def text_block(self):
+    #     return create_megabox(self.connected_components)
 
     @property
     def height(self):
@@ -284,6 +288,10 @@ class TextLine(Panel):
     def adjust_left_right(self):
         self.left = np.min([cc.left for cc in self.connected_components])
         self.right = np.max([cc.right for cc in self.connected_components])
+
+    def adjust_top_bottom(self):
+        self.top = np.min([cc.top for cc in self.connected_components])
+        self.bottom = np.max([cc.bottom for cc in self.connected_components])
 
     def append(self, element):
         return self.connected_components.append(element)

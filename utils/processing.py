@@ -288,7 +288,8 @@ def remove_connected_component(cc, connected_components):
     :param iterable connected_components: set of all connected components
     :return: smaller set of connected components
     """
-    connected_components = set(copy.deepcopy(connected_components))
+    if not isinstance(connected_components, set):
+        connected_components = set(copy.deepcopy(connected_components))
     connected_components.remove(cc)
     return connected_components
 
@@ -428,38 +429,29 @@ def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, 
     :param Rect crop_rect: original system where the panel was detected
     :param Rect expanded_rect: a larger part of an image, where a crop was formed
     :param iterable of Panels ccs: iterable of Panel objects to be transformed into the new coordinate system
-    :param bool absolute: True if the `parent_panel` coordinates are expressed in global coordinates,
-    False if expressed in the `in_crop_panel` coordinates. False by default
+    :param bool absolute: True if the `expanded_crop` coordinates are expressed in global coordinates,
+    False if expressed in the `crop_rect` coordinates, e.g. by extending `crop_rect`. False by default
     :return: list of new, mapped panels
     """
+
     new_panels = []
-    if absolute:
-        for cc in ccs:
-            height = cc.bottom - cc.top
-            width = cc.right - cc.left
+    if not absolute:
+        expanded_rect = Rect(0, 0, 0, 0) # This is just to simplify the function
+    for cc in ccs:
+        cls = type(cc)
+        height = cc.bottom - cc.top
+        width = cc.right - cc.left
 
-            new_top = cc.top + (crop_rect.top - expanded_rect.top)
-            new_bottom = new_top + height
+        new_top = cc.top + (crop_rect.top - expanded_rect.top)
+        new_bottom = new_top + height
+        cc.top = new_top
+        cc.bottom = new_bottom
 
-            new_left = cc.left + (crop_rect.left - expanded_rect.left)
-            new_right = new_left + width
-            new_panels.append(Panel(left=new_left,right=new_right,
-                                    top=new_top, bottom=new_bottom))
-
-    else:
-        for cc in ccs:
-            height = cc.bottom - cc.top
-            width = cc.right - cc.left
-
-            new_left = cc.left + crop_rect.left
-            new_right = new_left + width
-
-            new_top = cc.top + crop_rect.top
-            new_bottom = new_top + height
-
-            new_panels.append(Panel(left=new_left, right=new_right,
-                                    top=new_top, bottom=new_bottom))
-
+        new_left = cc.left + (crop_rect.left - expanded_rect.left)
+        new_right = new_left + width
+        cc.left = new_left
+        cc.right = new_right
+        new_panels.append(cc)
     return new_panels
 
 
