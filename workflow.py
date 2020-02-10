@@ -5,8 +5,8 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from utils.io import imread
 from utils.processing import erase_elements, preprocessing_remove_long_lines, get_bounding_box, create_megabox
-from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio,
-                     find_reaction_conditions, scan_conditions_text, binary_tag)
+from conditions import find_reaction_conditions, parse_conditions
+from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio,binary_tag)
 from chemschematicresolver.ocr import read_diag_text, read_label, read_conditions
 from models.segments import Figure
 
@@ -46,8 +46,10 @@ plt.show()
 all_conditions = []
 all_text = []
 for arrow in arrows:
-    conditions = find_reaction_conditions(fig, arrow, initial_ccs, global_skel_pixel_ratio)
+    conditions = find_reaction_conditions(fig, arrow, initial_ccs)
+    cond_text = parse_conditions(fig, arrow, initial_ccs)
     all_conditions.append(conditions)
+    all_text.append(cond_text)
 
 f, ax = plt.subplots()
 ax.imshow(fig.img)
@@ -55,25 +57,11 @@ for step in all_conditions:
     for panel in step:
         panel.adjust_left_right()
         panel.adjust_top_bottom()
-        print(f'panel-textline: {panel}')
+        # print(f'panel-textline: {panel}')
         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
         ax.add_patch(rect_bbox)
+plt.show()
 
-
-    for textline in step:
-        print(f'textline: {textline}')
-        print(f'connected components: {textline.connected_components}')
-        textline.adjust_left_right()
-        textline.adjust_top_bottom()
-        text_block = create_megabox(textline)
-        print(f'textline: {textline}')
-        print(f'megabox: {text_block}')
-        # cropped = crop_rect(fig.img, text_block)
-        # plt.imshow(cropped['img'], cmap=plt.cm.binary)
-        # plt.show()
-        textline, conf = read_conditions(fig, text_block)
-        print(textline.text, 'conf: ', conf)
-        print(f'cems: {textline.text[0].records.serialize()}')
 
 
 

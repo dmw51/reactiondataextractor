@@ -5,7 +5,8 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from utils.io import imread
 from utils.processing import erase_elements, binary_tag, get_bounding_box, crop_rect, create_megabox
-from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio, find_reaction_conditions)
+from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio)
+from conditions import find_reaction_conditions
 from chemschematicresolver.ocr import read_diag_text, read_label
 from models.segments import Figure
 from skimage.transform import resize

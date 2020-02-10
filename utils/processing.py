@@ -116,15 +116,13 @@ def label_and_get_ccs(fig):
     labelled = binary_tag(fig)
     return get_bounding_box(labelled)
 
-def erase_elements(fig, *elements):
+def erase_elements(fig, elements):
     """
     :param Figure fig: Figure object containing binarized image
     :param iterable of panels elements: list of elements to erase from image
     :return: copy of the Figure object with elements removed
     """
     fig= copy.deepcopy(fig)
-    if isinstance(elements, Container):
-        elements = [single_elem for cont in elements for single_elem in cont]
 
     try:
         flattened = fig.img.flatten()
