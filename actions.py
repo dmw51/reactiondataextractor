@@ -9,12 +9,7 @@ from scipy.ndimage import label
 from scipy.signal import find_peaks
 from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize as skeletonize_skimage
-from skimage.morphology import binary_dilation, disk
-from skimage.measure import regionprops
-from sklearn.cluster import DBSCAN, KMeans
-from sklearn.neighbors import KernelDensity
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from sklearn.model_selection import GridSearchCV
+
 
 from config import get_area
 from models.arrows import SolidArrow
@@ -24,11 +19,7 @@ from models.segments import Rect, Panel, Figure, TextLine
 from models.utils import Point, Line
 from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill, pad
 from utils.processing import binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, belongs_to_textline, is_boundary_cc
-from utils.processing import is_small_textline_character, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region
-from utils.processing import label_and_get_ccs
-import cv2
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.WARNING)
@@ -128,8 +119,8 @@ def find_solid_arrows(fig, thresholds=None,min_arrow_lengths=None):
     if thresholds is None:
         threshold = int((fig.img.shape[0]+fig.img.shape[1])*0.1)
         thresholds = [threshold, int(threshold/1.5)]
-    print('thresh :', thresholds)
-    print('min length :', min_arrow_lengths)
+    # print('thresh :', thresholds)
+    # print('min length :', min_arrow_lengths)
 
     # Find arrows in a two-step search
     arrows = find_solid_arrows_main_routine(fig,threshold=thresholds[0],min_arrow_length=min_arrow_lengths[0])
@@ -197,7 +188,6 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
 
         #control_set.update(*(value for value in panels_dict.values())) # The unpacking looks ugly
 
-        conditions = Conditions(connected_components=all_conditions[idx])
         reacts = panels_dict['reactants']
         prods = panels_dict['products']
         print(f'panels_dict: {panels_dict}')
@@ -208,7 +198,7 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
 
         reacts=Reactant(connected_components=reacts)
         prods = Product(connected_components=prods)
-        steps.append(ReactionStep(arrow,reacts,prods, conditions))
+        steps.append(ReactionStep(arrow,reacts,prods))
         #print('panels:', panels)
     # if control_set != panels:
     #     log.warning('Some connected components remain unassigned following scan_all_reaction_steps.')

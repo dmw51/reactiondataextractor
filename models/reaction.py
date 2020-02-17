@@ -20,9 +20,9 @@ class BaseReactionClass(object):
     """
 
 
-class ReactionElement(BaseReactionClass):
+class ChemicalStructure(BaseReactionClass):
     """
-    This is a base class for reaction elements found in diagrams (e.g. reactants,conditions and products)
+    This is a base class for chemical structures species found in diagrams (e.g. reactants and products)
     """
     def __init__(self, connected_components):
         self.connected_components = connected_components
@@ -66,29 +66,33 @@ class ReactionStep(BaseReactionClass):
         self.conditions = conditions
 
 
-class Conditions(ReactionElement):
+class Conditions:
     """
     This class describes conditions
     """
 
-    def __init__(self, connected_components):
-        super(Conditions, self).__init__(connected_components)
+    def __init__(self, text_lines, catalysts, co_reactants, other_species, other_conditions):
+        self.text_lines = text_lines
+        self.catalysts = catalysts
+        self.co_reactants = co_reactants
+        self.other_species = other_species
+        self.other_conditions = other_conditions
 
-class Reactant(ReactionElement):
+class Reactant(ChemicalStructure):
     """
     This class describes reactants
     """
     def __init__(self, connected_components):
         super(Reactant, self).__init__(connected_components)
 
-class Intermediate(ReactionElement):
+class Intermediate(ChemicalStructure):
     """
     This class describes reaction intermediates
     """
     def __init__(self, connected_components):
         super(Intermediate, self).__init__(connected_components)
 
-class Product(ReactionElement):
+class Product(ChemicalStructure):
     """
     This class describes final reaction products
     """

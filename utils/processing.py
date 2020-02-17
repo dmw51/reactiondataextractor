@@ -6,6 +6,7 @@ import numpy as np
 from scipy import ndimage as ndi
 from scipy.ndimage import label
 from scipy.ndimage import binary_closing
+from skimage.color import rgb2gray
 from skimage.measure import regionprops
 from skimage.morphology import disk, skeletonize
 from skimage.transform import probabilistic_hough_line
@@ -16,6 +17,14 @@ from skimage.util import crop as crop_skimage
 from models.utils import Line, Point
 from models.segments import Rect, Panel, Figure, TextLine
 
+
+def convert_greyscale(img):
+    """
+    Wrapper around skimage `rgb2gray` used for backward compatilibity
+    :param np.ndarray img: input image
+    :return np.ndarrat: image in grayscale
+    """
+    return rgb2gray(img)
 
 
 def crop(img, left=None, right=None, top=None, bottom=None):

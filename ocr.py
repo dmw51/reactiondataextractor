@@ -25,12 +25,12 @@ import warnings
 
 import numpy as np
 import tesserocr
+
 from chemdataextractor.doc.text import Sentence
-
-from . import decorators, io, model
-from .utils import convert_greyscale, crop, crop_rect, pad
-
-from .parse import ChemSchematicResolverTokeniser, LabelParser
+from chemdataextractor.parse.cem import BaseParser
+from chemschematicresolver import decorators, io, model
+from utils.processing import convert_greyscale, crop, crop_rect, pad
+from chemschematicresolver.parse import ChemSchematicResolverTokeniser, LabelParser
 
 import matplotlib.pyplot as plt
 log = logging.getLogger(__name__)
@@ -78,9 +78,9 @@ def read_label(fig, label, whitelist=LABEL_WHITELIST):
     raw_sentences = get_sentences(text)
 
     if len(raw_sentences) is not 0:
-        # Tag each sentence
+        # Tag each paragraph
         tagged_sentences = [Sentence(sentence, word_tokenizer=ChemSchematicResolverTokeniser(),
-                                           parsers=[LabelParser()]) for sentence in raw_sentences]
+                                           parsers=[BaseParser()]) for sentence in raw_sentences]
     else:
         tagged_sentences = []
     label.text = tagged_sentences
@@ -92,32 +92,42 @@ def read_label(fig, label, whitelist=LABEL_WHITELIST):
 
     return label, avg_conf
 
-def read_conditions(fig, textline,whitelist=CONDITIONS_WHITELIST):
+def read_conditions(fig, conditions_region,whitelist=CONDITIONS_WHITELIST):
     """
     Reads conditions' text in `fig.img` detected inside `textline` and returns the recognised OCR objects.
     :param Figure fig: figure containing unprocessed image
-    :param TextLine textline: text line object containing position of the line of text
+    :param Panel conditions_region: Panel delimiting position of conditions' text
     :param str whitelist: all characters that will be looked for in the text
     :return: ?
     """
 
     img = convert_greyscale(fig.img)
-    cropped_img = crop_rect(img, textline)
-    text = get_text(cropped_img, x_offset=textline.left, y_offset=textline.top, psm=PSM.SINGLE_BLOCK, whitelist=whitelist)
+    cropped_img = crop_rect(img, conditions_region)
+    text = get_text(cropped_img['img'], x_offset=conditions_region.left, y_offset=conditions_region.top, psm=PSM.SINGLE_BLOCK, whitelist=whitelist)
     raw_sentences = get_sentences(text)
 
     if len(raw_sentences) is not 0:
-        # Tag each sentence
-        tagged_sentences = [Sentence(sentence, word_tokenizer=ChemSchematicResolverTokeniser(),
-                                           parsers=[LabelParser()]) for sentence in raw_sentences]
+        # Tag each paragraph
+        tagged_sentences = [Sentence(sentence.strip(), word_tokenizer=ChemSchematicResolverTokeniser(),
+                                           parsers=[BaseParser()]) for sentence in raw_sentences]
     else:
         tagged_sentences = []
 
-    textline.text = tagged_sentences
     confidences = [t.confidence for t in text]
     avg_conf = np.mean(confidences)
     log.info('Confidence in OCR: %s' % avg_conf)
-    return textline, avg_conf
+    return tagged_sentences, avg_conf
+
+
+def read_isolated_conditions(isolated_block):
+    """
+    Helper function to read conditions from isolated connected components segmented as conditions' text characters
+    :param isolated_block:
+    :return:
+    """
+    fig = isolated_block
+    conditions_region = isolated_block.get_bounding_box()
+    return read_conditions(fig, conditions_region)
 # These enums just wrap tesserocr functionality, so we can return proper enum members instead of ints.
 
 class Orientation(enum.IntEnum):

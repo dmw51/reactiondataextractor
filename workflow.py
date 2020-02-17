@@ -1,16 +1,16 @@
 import os
 import copy
 
+
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
+from pprint import pprint
+
 from utils.io import imread
 from utils.processing import erase_elements, preprocessing_remove_long_lines, get_bounding_box, create_megabox
-from conditions import find_reaction_conditions, parse_conditions
+from conditions import find_reaction_conditions, get_conditions
 from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio,binary_tag)
-from chemschematicresolver.ocr import read_diag_text, read_label, read_conditions
-from models.segments import Figure
 
-import pytesseract
 import logging
 level = 'WARNING'
 # create logger
@@ -30,8 +30,8 @@ ch.setFormatter(formatter)
 # add ch to logger
 logger.addHandler(ch)
 
-
-PATH = os.path.join('C:/', 'Users', 'wilar', 'PycharmProjects', 'RDE', 'images', 'RDE_images', 'Easy', 'high_res')
+MAIN_DIR = os.getcwd()
+PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'Easy', 'high_res')
 # for file in os.listdir(PATH):
 filename = 'ja9b13071_0003.jpeg'
 p = os.path.join(PATH, filename)
@@ -47,7 +47,8 @@ all_conditions = []
 all_text = []
 for arrow in arrows:
     conditions = find_reaction_conditions(fig, arrow, initial_ccs)
-    cond_text = parse_conditions(fig, arrow, initial_ccs)
+    cond_text = get_conditions(fig, arrow, initial_ccs)
+    pprint(cond_text)
     all_conditions.append(conditions)
     all_text.append(cond_text)
 
@@ -55,8 +56,6 @@ f, ax = plt.subplots()
 ax.imshow(fig.img)
 for step in all_conditions:
     for panel in step:
-        panel.adjust_left_right()
-        panel.adjust_top_bottom()
         # print(f'panel-textline: {panel}')
         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
         ax.add_patch(rect_bbox)

@@ -5,6 +5,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+from pprint import pprint
 
 from collections import namedtuple, Counter
 import copy
@@ -21,21 +22,196 @@ from sklearn.neighbors import KernelDensity
 from sklearn.model_selection import GridSearchCV
 
 from actions import skeletonize_area_ratio
+from models.reaction import Conditions
 from models.segments import Rect, Figure, TextLine
 from models.utils import Point
 from utils.processing import approximate_line, create_megabox
 from utils.processing import (binary_tag, get_bounding_box, erase_elements, belongs_to_textline, is_boundary_cc,
-crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region, label_and_get_ccs)
-from chemschematicresolver.ocr import read_conditions
+isolate_patch, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region,
+                              label_and_get_ccs)
+from ocr import read_conditions, read_isolated_conditions
 from chemdataextractor.doc import Paragraph, Span
 from matplotlib.patches import Rectangle
 
 log = logging.getLogger(__name__)
 
-DEFAULT_VALUES_STRING = r'((?:\d\.)?\d{1,2})'  # Used for parsing recognized text
 
 
-def parse_conditions(fig, arrow, panels, scan_stepsize=10, scan_steps=10):
+
+class ConditionParser:
+    """
+    This class is used to parse conditions text. It is composed of several methods to facilitate parsing recognised text
+    using formal grammars.
+    """
+
+    """
+    The following strings define formal grammars to detect catalysts (cat) and co-reactants (co) based on their units.
+    Species which fulfill neither criterion can be parsed as `other_chemicals`. `default_values` is also defined to help 
+    parse both integers and floating-point values.
+    """
+    default_values = r'((?:\d\.)?\d{1,2})'
+    cat_units = r'(mol\s?%)'
+    co_units = r'(equiv(?:alents?)?\.?)'
+
+    def __init__(self, sentences):
+        self.sentences = sentences  # sentences are CDE Sentence objects
+
+    def parse_conditions(self):
+        parse_fns = [ConditionParser._parse_co_reactants, ConditionParser._parse_catalysis,
+                     ConditionParser._parse_other_species, ConditionParser._parse_other_conditions]
+        conditions_dct = {'catalysts': None, 'co-reactants': None, 'other species': None, 'temperature':None,
+                          'pressure': None, 'time': None}
+        co_reactants_lst = []
+        catalysis_lst = []
+        other_species_lst = []
+        for sentence in self.sentences:
+            parsed = [parse(sentence) for parse in parse_fns]
+            co_reactants_lst.extend(parsed[0])
+            catalysis_lst.extend(parsed[1])
+            other_species_lst.extend(parsed[2])
+            conditions_dct.update(parsed[3])
+
+        conditions_dct['co-reactants'] = co_reactants_lst
+        conditions_dct['catalysts'] = catalysis_lst
+        conditions_dct['other species'] = other_species_lst
+        pprint(conditions_dct)
+        return conditions_dct
+
+    @staticmethod
+    def _identify_species(sentence):
+        cems = sentence.cems
+        # cems = [cem.text for cem in cems]
+        other_identifiers = r'(?:^|[,])(?<!\w)\s?([A-Z]+)(?!\w)(?!\))'  # Up to two capital letters? Just a single one?
+        number_identifiers = r'(?:^| )(?<!\w)([1-9])(?!\w)(?!\))(?:$|[, ])(?![A-Za-z])'
+        # number_identifiers matches the following:
+        # 1, 2, 3, three numbers as chemical identifiers
+        # CH3OH, 5, 6 (5 equiv) 5 and 6 in the middle only
+        # 5 5 equiv  first 5 only
+        # A 5 equiv -no matches
+        entity_mentions_letters = re.finditer(other_identifiers, sentence.text)
+        entity_mentions_numbers = re.finditer(number_identifiers, sentence.text)
+        numbers_letters_span = [Span(e.group(1), e.start(), e.end()) for e in
+                                chain(entity_mentions_numbers, entity_mentions_letters)]
+        all_mentions = [mention for mention in chain(cems, numbers_letters_span)
+                        if mention]
+        return all_mentions
+
+    @staticmethod
+    def _parse_co_reactants(sentence):
+        cems = ConditionParser._identify_species(sentence)
+        print(f'cems: {cems}')
+        co_values = ConditionParser.default_values
+        co_str = re.compile(co_values + r'\s?' + ConditionParser.co_units)
+        return ConditionParser._find_closest_cem(cems, sentence, co_str) if cems else []   # ret value must be iterable
+
+
+    @staticmethod
+    def _parse_catalysis(sentence):
+        cems = ConditionParser._identify_species(sentence)
+
+        cat_values = ConditionParser.default_values
+        cat_str = re.compile(cat_values + r'\s?' + ConditionParser.cat_units)
+
+        return ConditionParser._find_closest_cem(cems, sentence, cat_str) if cems else []
+
+    @staticmethod
+    def _parse_other_species(sentence):
+        cems = ConditionParser._identify_species(sentence)
+
+        other_species_if_end = r'(?:,|\.|$|\s)\s?(?!\()'
+
+        other_species = []
+        for cem in cems:
+            species_str = re.compile('(' + cem.text + ')' + other_species_if_end)
+            species = re.search(species_str, sentence.text)
+            if species and species.group(1) == cem.text:
+                other_species.append(cem)
+
+        return other_species
+
+    @staticmethod
+    def _parse_other_conditions(sentence):
+        other_dct = {}
+        parsed = [ConditionParser._parse_temperature(sentence), ConditionParser._parse_time(sentence),
+                  ConditionParser._parse_pressure(sentence)]
+        if parsed[0]:
+            other_dct['temperature'] = parsed[0] # Create the key only if temperature was parsed
+
+        if parsed[1]:
+            other_dct['time'] = parsed[1]
+
+        if parsed[2]:
+            other_dct['pressure'] = parsed[2]
+
+        return other_dct
+
+    @staticmethod
+    def _find_closest_cem(cems, sentence, parse_str):
+        matches = []
+        for entity in re.finditer(parse_str, sentence.text):
+            closest_cem = sorted([(cem, entity.start() - cem.start) for cem in cems if cem.start < entity.start()],
+                                 key=lambda x: x[1])[0]  # choose first (cem, distance) pair
+            closest_cem = closest_cem[0]   # choose cem from the pair
+            matches.append({'Species': closest_cem, 'Value': float(entity.group(1)), 'Units': entity.group(2)})
+        return matches
+
+    @staticmethod
+    def _parse_time(sentence):  # add conditions to add the parsed data
+        t_values = ConditionParser.default_values
+        t_units = r'(h(?:ours?)?|m(?:in)?|s(?:econds)?|days?)'
+        time_str = re.compile(r'(?<!\w)' + t_values + r'\s?' + t_units + r'(?=$|\s?,)')
+        time = re.search(time_str, sentence.text)
+        if time:
+            print(time)
+            return {'Value': float(time.group(1)), 'Units': time.group(2)}
+        else:
+            log.info('Time was not found for...')
+
+    @staticmethod
+    # TODO: are 'rt' and 'heat' `values` or `units`?
+    def _parse_temperature(sentence):
+        # The following formals grammars for temperature and pressure are quite complex, but allow to parse additional
+        # generic descriptors like 'heat' or 'UHV' in `.group(1)'
+        t_units = r'\s?0C|\wC|K'   # match 0C, oC and similar, as well as K
+
+        t_value1 = r'\d{1,4}' + r'(?=\s?' + t_units + ')'  # capture numbers only if followed by units
+        t_value2 = r'rt'
+        t_value3 = r'heat'
+
+        # Add greek delta?
+        # TODO: return won't work for 'rt' or 'heat' - conversion to float. To be fixed.
+        t_or = re.compile('(' + '|'.join((t_value1, t_value2, t_value3 + ')' + '(' + t_units + ')' + '?')), re.I)
+        temperature = re.search(t_or, sentence.text)
+        if temperature:
+            units = temperature.group(2) if temperature.group(2) else 'N/A'
+            try:
+                return {'Value': float(temperature.group(1)), 'Units': units}
+            except ValueError:
+                return {'Value': temperature.group(1), 'Units': units}   # if value is rt or heat
+        else:
+            log.info('Temperature was not found for...')
+
+
+    @staticmethod
+    # TODO: inconsistent assignment to `values` and `units` in pressure and temperature parsing
+    def _parse_pressure(sentence):
+        p_units = r'(?:m|h|k|M)?Pa|m?bar|atm'   # match bar, mbar, mPa, hPa, MPa and atm
+
+        p_values1 = r'\d{1,4}' + r'\s?(?=' + p_units + ')'  # match numbers only if followed by units
+        p_values2 = r'(?:U?HV)|vacuum'
+
+
+        p_or = re.compile('(' + '|'.join((p_values1, p_values2 + ')' + '(' + p_units + ')' + '?')))
+        pressure = re.search(p_or, sentence.text)
+        if pressure:
+            units = pressure.group(2) if pressure.group(2) else 'N/A'
+            return {'Value': float(pressure.group(1)), 'Units': units}
+        else:
+            log.info('Temperature was not found for...')
+
+
+
+def get_conditions(fig, arrow, panels, scan_stepsize=10, scan_steps=10):
     """
 
     :param fig:
@@ -46,27 +222,62 @@ def parse_conditions(fig, arrow, panels, scan_stepsize=10, scan_steps=10):
     :return:
     """
     textlines = find_reaction_conditions(fig, arrow, panels, scan_stepsize, scan_steps)
-    recognised_text = []
-    for textline in textlines:
-        textline.adjust_left_right()
-        textline.adjust_top_bottom()
-        recognised = read_conditions(erase_elements(fig, [arrow]),
-                                 textline)  # list of tuples (TextBlock, ocr_confidence)
-        recognised_text.append(recognised)
-    print(f'recognised: {recognised_text}')
-    conf_lines = [text_block for text_block, confidence in recognised_text if confidence >= 0.65]
 
-    for line in conf_lines:
-        print(line.text)
+    recognised, conf = read_conditions(*prepare_text_block(fig, textlines))
+    print(recognised)
+    parser = ConditionParser(recognised)
+    conditions_dct = parser.parse_conditions()
+    #
+    # conditions_dct = {'co_reactants': None, 'catalysts': None, 'other'}
+    # # Need to parse info to get a dictionary (or multiple) that will contain:
+    # # conditions like time or temperature - dictionary or individually? - dictionary better as some reactions have sparse
+    # # infor or none on these
+    # #second dictionary of chemicals?
+    # # with this approach - might be easier to separate into multiple dictionaries?
+    #
+    #
+    # print(f'recognised text: {recognised}')
+    # # for textline in textlines:
+    # #     recognised = read_conditions(erase_elements(fig, [arrow]),
+    # #                              textline)  # list of tuples (TextBlock, ocr_confidence)
+    # #     recognised_text.append(recognised)
+    # # print(f'recognised: {recognised_text}')
+    #
+    #
+    # # print(found_text)
+    #
+    # cems = identify_chemicals(recognised)
+    # chem_dct = contextualize_cems(recognised, cems)
+    # if not chem_dct.values():
+    #     log.warning(f'No chemicals were found when parsing conditions for step around arrow {arrow}')
+    #
+    # other_conditions = parse_other_conditions(re)
+    #
+    # pprint(chem_dct)
+    # pprint(other_conditions)
+    return None
+    return Conditions(textlines, chem_dct['catalysts'], chem_dct['co_reactants'], chem_dct['other'], other_conditions)
 
-    for line in conf_lines:
-        cems = identify_chemicals(line.text[0])
-        chem_dct = contextualize_cems(line.text[0], cems)
-        print(chem_dct)
-    # text = Paragraph(text)
-    # cems = identify_chemicals(text)
-    # cems_info = contextualize_cems(text, cems)
-    # print(cems_info)
+
+
+
+
+
+
+
+
+def prepare_text_block(fig, textlines):
+    """
+    This function isolates all connected components identified as relevant text characters and outputs the new Figure
+    object as well as the Panel defining the region
+    :param fig:
+    :param textlines:
+    :return:
+    """
+    isolated_block = isolate_patch(fig, (char for textline in textlines for char in textline.connected_components))
+    panel = create_megabox([char for textline in textlines for char in textline.connected_components])
+
+    return isolated_block, panel
 
 
 def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
@@ -148,7 +359,7 @@ def scan_conditions_text2(fig, conditions, arrow):
 
     search_region = Rect(conditions_box.left-extended_boundary_horizontal, conditions_box.right+extended_boundary_horizontal,
                conditions_box.top-extended_boundary_vertical, conditions_box.bottom+extended_boundary_vertical)
-    print(f'search region: {search_region}')
+    # print(f'search region: {search_region}')
     crop_dct = crop_rect(fig.img, search_region)
     if crop_dct['rectangle'] != search_region:
         search_region = crop_dct['img']
@@ -161,17 +372,17 @@ def scan_conditions_text2(fig, conditions, arrow):
     textlines = [TextLine(0, search_region.img.shape[1], upper, lower)
                  for upper, lower in zip(top_boundaries, bottom_boundaries)]
 
-    f, ax = plt.subplots()
-    ax.imshow(search_region.img)
-    for line in top_boundaries:
-       ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='r')
-    for line in bottom_boundaries:
-       ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='b')
-    plt.show()
+    # f, ax = plt.subplots()
+    # ax.imshow(search_region.img)
+    # for line in top_boundaries:
+    #    ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='r')
+    # for line in bottom_boundaries:
+    #    ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='b')
+    # plt.show()
 
-    print(f'textlines:{textlines}')
+    # print(f'textlines:{textlines}')
     text_candidate_buckets = assign_characters_to_textlines(search_region.img, textlines, ccs)
-    print(f'example textline ccs: {text_candidate_buckets[0].connected_components}')
+    # print(f'example textline ccs: {text_candidate_buckets[0].connected_components}')
     mixed_text_candidates = [element for textline in text_candidate_buckets for element in textline]
 
 
@@ -179,12 +390,12 @@ def scan_conditions_text2(fig, conditions, arrow):
     text_candidate_buckets = assign_characters_proximity_search(search_region,
                                                                 remaining_elements, text_candidate_buckets)
 
-    print(f'buckets: {text_candidate_buckets}')
-    print(f'buckets after filtering: {text_candidate_buckets}')
-    print(f'example textline ccs2: {text_candidate_buckets[0].connected_components}')
+    # print(f'buckets: {text_candidate_buckets}')
+    # print(f'buckets after filtering: {text_candidate_buckets}')
+    # print(f'example textline ccs2: {text_candidate_buckets[0].connected_components}')
     if len(text_candidate_buckets) > 2:
         text_candidate_buckets = isolate_full_text_block(text_candidate_buckets, arrow)
-    print(f'buckets: {text_candidate_buckets}')
+    # print(f'buckets: {text_candidate_buckets}')
 
     transformed_textlines= []
     for textline in text_candidate_buckets:
@@ -205,8 +416,8 @@ def attempt_remove_structure_parts(cropped_img, text_ccs):
     #    ax.add_patch(rect_bbox)
     # ax.set_title('characters removed')
     # plt.show()
-    skel_pixel_ratio = skeletonize_area_ratio(Figure(cropped_img),Rect(0,cropped_img.shape[1], 0, cropped_img.shape[0]))
-    print(f'the skel-pixel ratio is {skel_pixel_ratio}')
+    # skel_pixel_ratio = skeletonize_area_ratio(Figure(cropped_img),Rect(0,cropped_img.shape[1], 0, cropped_img.shape[0]))
+    # print(f'the skel-pixel ratio is {skel_pixel_ratio}')
     closed = binary_dilation(crop_no_letters.img,selem=disk(4)) #Decide based on skel-pixel ratio
     labelled = binary_tag(Figure(closed))
     ccs = get_bounding_box(labelled)
@@ -291,14 +502,14 @@ def assign_characters_to_textlines(img, textlines, ccs, transform_from_crop=Fals
             #         textline_text_candidates.append(cc)
 
         textline_text_candidates = filter_distant_text_character(textline_text_candidates)
-        print(f'textline text cands: {textline_text_candidates}')
+        # print(f'textline text cands: {textline_text_candidates}')
         if transform_from_crop:
             textline_text_candidates = transform_panel_coordinates_to_expanded_rect(
                 crop_rect, Rect(0,0,0,0), textline_text_candidates) #Relative only so a placeholder Rect is the input
 
         if textline_text_candidates: #If there are any candidates
             textline.connected_components = textline_text_candidates
-            print(f'components: {textline.connected_components}')
+            # print(f'components: {textline.connected_components}')
             text_candidate_buckets.append(textline)
 
     return text_candidate_buckets
@@ -316,9 +527,8 @@ def assign_characters_proximity_search(img, chars_to_assign, textlines):
     mixed_text_ccs = [char for textline in textlines for char in textline]
     mean_character_area = np.mean([char.area for char in mixed_text_ccs])
     for element in chars_to_assign:
-        assigned = attempt_assign_to_nearest_text_element(img, element, mean_character_area)
+        assigned = attempt_assign_small_to_nearest_text_element(img, element, mean_character_area)
         if assigned:
-            print(f'assigned: {assigned}')
             small_cc, assigned_closest_cc = assigned
 
             for textline in textlines :
@@ -335,8 +545,6 @@ def assign_characters_proximity_search(img, chars_to_assign, textlines):
 
 
 def isolate_full_text_block(textlines, arrow):
-    for textline in textlines:
-        textline.adjust_left_right()
     # mixed_text_elements = [elem for textline in text_buckets for elem in textline]
     mean_textline_height = np.mean([textline.height for textline in textlines])
     # char_areas = [elem.area for elem in mixed_text_elements]
@@ -345,14 +553,14 @@ def isolate_full_text_block(textlines, arrow):
     # data = np.array([(*elem.center, elem.area) for elem in mixed_text_elements]).reshape(-1,3)
     data = [textline.center for textline in textlines]
     data.append(arrow.center)
-    print(data)
+    # print(data)
     # center_area_ratio = np.mean(mean_char_area + mean_char_size)
     # max_r = np.sqrt((mean_char_area+3*std_area)**2 + mean_char_size**2)
     db = DBSCAN(eps=mean_textline_height*4, min_samples=2).fit(data)
     labels = db.labels_
-    print(f'labels: {labels}')
+    # print(f'labels: {labels}')
     main_cluster = [textline for textline, label in zip(textlines, labels) if label == 0]
-    print(f'found cluster: {main_cluster}')
+    # print(f'found cluster: {main_cluster}')
 
     return main_cluster
 
@@ -401,7 +609,7 @@ def filter_distant_text_character(ccs):
     return [cc for cc, label in zip(ccs, db_labels) if label == 0]
 
 
-def attempt_assign_to_nearest_text_element(fig, cc, mean_character_area, small_cc=True):
+def attempt_assign_small_to_nearest_text_element(fig, cc, mean_character_area, small_cc=True):
     """
     Crops `fig.img` and does a simple proximity search to determine the closest character.
     :param Figure fig: figure object containing image with the cc panel
@@ -419,101 +627,28 @@ def attempt_assign_to_nearest_text_element(fig, cc, mean_character_area, small_c
     cropped_img = cropped_img['img']
     cc_in_shrunken_region = transform_panel_coordinates_to_shrunken_region(crop_region, cc)[0]
     ccs = label_and_get_ccs(Figure(cropped_img))
-    print(ccs)
-    small_cc = True if cc.area < mean_character_area else False
+    # print(ccs)
+    small_cc = True if cc.area < 1.2 * mean_character_area else False
 
     if small_cc:
-        print(cc.area)
-        closest_ccs = sorted([(other_cc, other_cc.separation(cc_in_shrunken_region))
+        close_ccs= sorted([(other_cc, other_cc.separation(cc_in_shrunken_region))
                              for other_cc in ccs if other_cc.area > 1.3 * cc.area], key=lambda elem: elem[1])
         # Calculate separation, sort,
         # then choose the smallest non-zero (index 1) separation
-    else:
-        closest_ccs = sorted([(other_cc, other_cc.separation(cc_in_shrunken_region))
-                             for other_cc in ccs], key=lambda elem: elem[1])
 
-    if len(closest_ccs) > 1:
-        closest_cc = closest_ccs[1]
+        if len(close_ccs) > 1:
+            closest_cc = close_ccs[1]
+        else:
+            return None
+
+        if closest_cc[1] > 2 * mean_character_diagonal:
+            return None  # Too far away
+
+        closest_cc_transformed = transform_panel_coordinates_to_expanded_rect(crop_region, fig.img, [closest_cc[0]])[0]
+        return cc, closest_cc_transformed
+
     else:
         return None
 
-    if closest_cc[1] > 2 * mean_character_diagonal:
-        return None   # Too far away
-
-    closest_cc_transformed = transform_panel_coordinates_to_expanded_rect(crop_region, fig.img, [closest_cc[0]])[0]
-    return cc, closest_cc_transformed
-
-def identify_chemicals(sentence):
-    cems = sentence.cems
-    #cems = [cem.text for cem in cems]
-    other_identifiers = r'(?<!\w)([A-Z]+)(?!\w)(?!\))' # Up to two capital letters? Just a single one?
-    number_identifiers = r'(?:^| )(?<!\w)([1-9])(?!\w)(?!\))(?:$|[, ])(?![A-Za-z])'
-    #number_identifiers matches the following:
-    #1, 2, 3, three numbers as chemical identifiers
-    # CH3OH, 5, 6 (5 equiv) 5 and 6 in the middle only
-    # 5 5 equiv  first 5 only
-    # A 5 equiv -no matches
-    entity_mentions_letters = re.finditer(other_identifiers, sentence.text)
-    entity_mentions_numbers = re.finditer(number_identifiers, sentence.text)
-    numbers_letters_span = [Span(e.group(1), e.start(), e.end()) for e in chain(entity_mentions_numbers, entity_mentions_letters)]
-    all_mentions = [mention for mention in chain (cems, numbers_letters_span)
-                    if mention]
-    return all_mentions
 
 
-def contextualize_cems(sentence, all_cems):
-    catalysis_info = parse_catalysis(sentence, all_cems)
-    print(f'catalysts: {catalysis_info}')
-    remaining_species = [species for species in all_cems if all(species != cat['Species'] for cat in catalysis_info)]
-    print(remaining_species)
-    auxilliary_chemicals = parse_aux_chemicals(sentence, remaining_species)
-    print(f'auxilliary chemicals: {auxilliary_chemicals}')
-    remaining_species = [species for species in remaining_species if
-                         all(species != aux['Species'] for aux in auxilliary_chemicals)]
-    print(f'remaining chemicals: {remaining_species}')
-    remaining_species = {'Species': remaining_species}
-
-    return {'catalysts': catalysis_info, 'aux_chemicals':auxilliary_chemicals, 'other': remaining_species}
-
-
-def parse_aux_chemicals(sentence, cems):
-    aux_units = r'(equiv(?:alents?)?\.?)'
-    aux_values = DEFAULT_VALUES_STRING
-    aux_str = re.compile(aux_values + r'\s?' + aux_units)
-
-    auxiliaries = []
-
-    for entity in re.finditer(aux_str, sentence.text):
-        print(f'entity: {entity}')
-        closest_cem = sorted([(cem, entity.start() - cem.start) for cem in cems if cem.start < entity.start()],
-                             key=lambda x: x[1])[0] #start is a callabe in re
-        closest_cem = closest_cem[0]
-        auxiliaries.append({'Species': closest_cem, 'Value': entity.group(1), 'Units': entity.group(2)})
-        global parsed_tokens
-        parsed_tokens.extend(group for group in entity.groups() if group)
-        parsed_tokens.append(closest_cem.text)
-
-    return auxiliaries
-
-def parse_catalysis(sentence, cems):
-    cat_units1= r'(mol\s?%)'
-
-    cat_values = DEFAULT_VALUES_STRING
-
-    cat_str = re.compile(cat_values + r'\s?' + cat_units1)
-
-
-    print(cems)
-    catalysts = []
-    for entity in re.finditer(cat_str, sentence.text):
-
-        closest_cem = sorted([(cem,entity.start() - cem.start) for cem in cems if cem.start < entity.start()],
-                             key=lambda x: x[1])[0]
-        closest_cem = closest_cem[0]
-        print(type(closest_cem))
-        print(f'closest cem: {closest_cem}')
-        catalysts.append({'Species': closest_cem, 'Value': entity.group(1), 'Units': entity.group(2)})
-        global parsed_tokens
-        parsed_tokens.extend(group for group in entity.groups() if group)
-        parsed_tokens.append(closest_cem.text)
-    return catalysts

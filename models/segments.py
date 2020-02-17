@@ -249,13 +249,14 @@ class Figure(object):
         top, bottom = np.where(cols)[0][[0, -1]]
         return Panel(left, right, top, bottom)
 
+
 class TextLine(Panel):
 
     def __init__(self, left, right, top, bottom, connected_components=None):
         self.text = None
         self._height = None
         self._width = None
-        self.connected_components = connected_components
+        self._connected_components = connected_components
         # self.find_text() # will be used to find text from `connected_components`
         super(Panel, self).__init__(left, right, top, bottom)
 
@@ -265,9 +266,18 @@ class TextLine(Panel):
     def __contains__(self, item):
         return item in self.connected_components
 
-    # @property
-    # def text_block(self):
-    #     return create_megabox(self.connected_components)
+    @property
+    def connected_components(self):
+        return self._connected_components
+
+    @connected_components.setter
+    def connected_components(self, value):   # Adjust bbox parameters when 'self._connected_components' are altered
+        self._connected_components = value
+        self.left = np.min([cc.left for cc in self.connected_components])
+        self.right = np.max([cc.right for cc in self.connected_components])
+        self.top = np.min([cc.top for cc in self.connected_components])
+        self.bottom = np.max([cc.bottom for cc in self.connected_components])
+
 
     @property
     def height(self):
@@ -285,13 +295,7 @@ class TextLine(Panel):
             return np.max([cc.right for cc in self.connected_components])\
                    - np.min([cc.left for cc in self.connected_components])
 
-    def adjust_left_right(self):
-        self.left = np.min([cc.left for cc in self.connected_components])
-        self.right = np.max([cc.right for cc in self.connected_components])
 
-    def adjust_top_bottom(self):
-        self.top = np.min([cc.top for cc in self.connected_components])
-        self.bottom = np.max([cc.bottom for cc in self.connected_components])
 
     def append(self, element):
         return self.connected_components.append(element)
