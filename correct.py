@@ -30,12 +30,17 @@ class Correct:
         words = self.text.split(' ')
         new_text = []
         for word in words:
-            word= re.sub(r'[(){}<>]', '', word)
-            correction_candidates = sorted([(candidate, self.get_comparison_confidence(word, candidate))
-                                      for candidate in self.correction_candidates], key = lambda x: x[1], reverse=True)
+            if word.startswith('(') and ')' not in word:
+                word = re.sub(r'[()]', '', word)
+            elif word.endswith(')') and '(' not in word:
+                word = re.sub(r'[()]', '', word)
+            print(f'subbed word: {word}')
+            correction_candidates = sorted([(candidate, self._get_comparison_confidence(word, candidate))
+                                            for candidate in self.correction_candidates], key = lambda x: x[1], reverse=True)
             print(f'correction_candidates: {correction_candidates}')
+            trailing = ',' if word.endswith(',') else ''
             if correction_candidates[0][1] >= self.confidence:
-                new_text.append(correction_candidates[0][0])
+                new_text.append(correction_candidates[0][0] + trailing)
             else:
                 new_text.append(word)
         print(f'new text: {new_text}')
@@ -44,7 +49,8 @@ class Correct:
     def _generate_n_grams(self, text):
         return [text[i:i+self.len_n_grams] for i in range(0, len(text)-self.len_n_grams+1)]
 
-    def get_comparison_confidence(self, word, other):
+    def _get_comparison_confidence(self, word, other):
+        word = re.sub(r',$', '', word)
         word_n_grams = self._generate_n_grams(word)
         expected_n_grams = self.candidate_n_grams[other]  #  Can expand this later
         print(f'expected n_grams : {expected_n_grams}')
@@ -52,6 +58,7 @@ class Correct:
         intersection = [n_gram for n_gram in word_n_grams if n_gram in expected_n_grams]  #  Can be done using sets?
         print(f'intersection: {intersection}')
         return len(intersection)/max(len(word_n_grams), len(expected_n_grams))   #  Return confidence
+
 
 
 

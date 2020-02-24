@@ -21,7 +21,7 @@ def test_identify_chemicals():
 
 def test_parse_co_reactants():
     parser = ConditionParser(SENTENCES)
-    co_reactants = [parser._parse_co_reactants(sentence) for sentence in parser.sentences]
+    co_reactants = [parser._parse_coreactants(sentence) for sentence in parser.sentences]
     print(f'co_reactants: {co_reactants}')
     print('---------------')
     assert co_reactants == [[{'Species': Span('LiOH',0,4), 'Value': 3, 'Units': 'equiv.'}],

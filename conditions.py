@@ -57,21 +57,22 @@ class ConditionParser:
         self.sentences = sentences  # sentences are CDE Sentence objects
 
     def parse_conditions(self):
-        parse_fns = [ConditionParser._parse_co_reactants, ConditionParser._parse_catalysis,
+        parse_fns = [ConditionParser._parse_coreactants, ConditionParser._parse_catalysis,
                      ConditionParser._parse_other_species, ConditionParser._parse_other_conditions]
         conditions_dct = {'catalysts': None, 'co-reactants': None, 'other species': None, 'temperature':None,
-                          'pressure': None, 'time': None}
-        co_reactants_lst = []
+                          'pressure': None, 'time': None, 'yield': None}
+        coreactants_lst = []
         catalysis_lst = []
         other_species_lst = []
         for sentence in self.sentences:
             parsed = [parse(sentence) for parse in parse_fns]
-            co_reactants_lst.extend(parsed[0])
+
+            coreactants_lst.extend(parsed[0])
             catalysis_lst.extend(parsed[1])
             other_species_lst.extend(parsed[2])
             conditions_dct.update(parsed[3])
 
-        conditions_dct['co-reactants'] = co_reactants_lst
+        conditions_dct['co-reactants'] = coreactants_lst
         conditions_dct['catalysts'] = catalysis_lst
         conditions_dct['other species'] = other_species_lst
         pprint(conditions_dct)
@@ -79,25 +80,27 @@ class ConditionParser:
 
     @staticmethod
     def _identify_species(sentence):
-        cems = sentence.cems
+        formulae_identifies = r'(\(?\b(?:[A-Z][a-z]{0,2}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
+        # letters between which some lowercase letters and digits are allows, optional brackets
         # cems = [cem.text for cem in cems]
-        other_identifiers = r'(?:^|[,])(?<!\w)\s?([A-Z]+)(?!\w)(?!\))'  # Up to two capital letters? Just a single one?
+        other_identifiers = r'(?:^|[,])(?<!\w)\s?([A-Z]+)(?!\w)(?!\))'  # Up to four capital letters? Just a single one?
         number_identifiers = r'(?:^| )(?<!\w)([1-9])(?!\w)(?!\))(?:$|[, ])(?![A-Za-z])'
         # number_identifiers matches the following:
         # 1, 2, 3, three numbers as chemical identifiers
         # CH3OH, 5, 6 (5 equiv) 5 and 6 in the middle only
         # 5 5 equiv  first 5 only
         # A 5 equiv -no matches
+        entity_mentions_formulae = re.finditer(formulae_identifies, sentence.text)
         entity_mentions_letters = re.finditer(other_identifiers, sentence.text)
         entity_mentions_numbers = re.finditer(number_identifiers, sentence.text)
         numbers_letters_span = [Span(e.group(1), e.start(), e.end()) for e in
-                                chain(entity_mentions_numbers, entity_mentions_letters)]
-        all_mentions = [mention for mention in chain(cems, numbers_letters_span)
+                                chain(entity_mentions_formulae, entity_mentions_numbers, entity_mentions_letters)]
+        all_mentions = [mention for mention in chain(entity_mentions_formulae, numbers_letters_span)
                         if mention]
         return all_mentions
 
     @staticmethod
-    def _parse_co_reactants(sentence):
+    def _parse_coreactants(sentence):
         cems = ConditionParser._identify_species(sentence)
         print(f'cems: {cems}')
         co_values = ConditionParser.default_values
@@ -111,14 +114,14 @@ class ConditionParser:
 
         cat_values = ConditionParser.default_values
         cat_str = re.compile(cat_values + r'\s?' + ConditionParser.cat_units)
-
+        print(f'cems :{cems}')
         return ConditionParser._find_closest_cem(cems, sentence, cat_str) if cems else []
 
     @staticmethod
     def _parse_other_species(sentence):
         cems = ConditionParser._identify_species(sentence)
 
-        other_species_if_end = r'(?:,|\.|$|\s)\s?(?!\()'
+        other_species_if_end = r'(?:,|\.|$|\s)\s?(?!\d)'
 
         other_species = []
         for cem in cems:
@@ -133,15 +136,18 @@ class ConditionParser:
     def _parse_other_conditions(sentence):
         other_dct = {}
         parsed = [ConditionParser._parse_temperature(sentence), ConditionParser._parse_time(sentence),
-                  ConditionParser._parse_pressure(sentence)]
+                  ConditionParser._parse_pressure(sentence), ConditionParser._parse_yield(sentence)]
         if parsed[0]:
-            other_dct['temperature'] = parsed[0] # Create the key only if temperature was parsed
+            other_dct['temperature'] = parsed[0]  # Create the key only if temperature was parsed
 
         if parsed[1]:
             other_dct['time'] = parsed[1]
 
         if parsed[2]:
             other_dct['pressure'] = parsed[2]
+
+        if parsed[3]:
+            other_dct['yield'] = parsed[3]
 
         return other_dct
 
@@ -174,13 +180,12 @@ class ConditionParser:
         # generic descriptors like 'heat' or 'UHV' in `.group(1)'
         t_units = r'\s?0C|\wC|K'   # match 0C, oC and similar, as well as K
 
-        t_value1 = r'\d{1,4}' + r'(?=\s?' + t_units + ')'  # capture numbers only if followed by units
+        t_value1 = r'\d{1,4}' + r'\s?(?=' + t_units + ')'  # capture numbers only if followed by units
         t_value2 = r'rt'
         t_value3 = r'heat'
 
         # Add greek delta?
-        # TODO: return won't work for 'rt' or 'heat' - conversion to float. To be fixed.
-        t_or = re.compile('(' + '|'.join((t_value1, t_value2, t_value3 + ')' + '(' + t_units + ')' + '?')), re.I)
+        t_or = re.compile('(' + '|'.join((t_value1, t_value2, t_value3 ))+ ')' + '(' + t_units + ')' + '?', re.I)
         temperature = re.search(t_or, sentence.text)
         if temperature:
             units = temperature.group(2) if temperature.group(2) else 'N/A'
@@ -201,13 +206,34 @@ class ConditionParser:
         p_values2 = r'(?:U?HV)|vacuum'
 
 
-        p_or = re.compile('(' + '|'.join((p_values1, p_values2 + ')' + '(' + p_units + ')' + '?')))
+        p_or = re.compile('(' + '|'.join((p_values1, p_values2 ))+ ')' + '(' + p_units + ')' + '?')
         pressure = re.search(p_or, sentence.text)
         if pressure:
             units = pressure.group(2) if pressure.group(2) else 'N/A'
             return {'Value': float(pressure.group(1)), 'Units': units}
         else:
-            log.info('Temperature was not found for...')
+            log.info('Pressure was not found for...')
+
+    @staticmethod
+    def _parse_yield(sentence):
+
+        y_units = r'%'   # match 0C, oC and similar, as well as K
+
+        y_value1 = r'\d{1,2}' + r'\s?(?=' + y_units + ')'  # capture numbers only if followed by units
+        y_value2 = r'gram scale'
+
+        # Add greek delta?
+        y_or = re.compile('(' + '|'.join((y_value1, y_value2)) + ')' + '(' + y_units + ')' + '?')
+        y = re.search(y_or, sentence.text)
+        if y:
+            units = y.group(2) if y.group(2) else 'N/A'
+            try:
+                return {'Value': float(y.group(1)), 'Units': units}
+            except ValueError:
+                return {'Value': y.group(1), 'Units': units}   # if value is gram scale
+        else:
+            log.info('Yield was not found for...')
+
 
 
 
@@ -524,18 +550,19 @@ def assign_characters_proximity_search(img, chars_to_assign, textlines):
     :param textlines
     :return:
     """
+    print(f'textlines before small assigned: {textlines}')
     mixed_text_ccs = [char for textline in textlines for char in textline]
     mean_character_area = np.mean([char.area for char in mixed_text_ccs])
     for element in chars_to_assign:
         assigned = attempt_assign_small_to_nearest_text_element(img, element, mean_character_area)
         if assigned:
             small_cc, assigned_closest_cc = assigned
-
             for textline in textlines :
                 if assigned_closest_cc in textline:
                     #to_filter_out.add(small_cc)
                     textline.append(small_cc)
-
+                    print(f'small cc appended: {small_cc}')
+    print(f'textlines after small assigned: {textlines}')
     #sanity check:
     # after_assignment = set([elem for textline in textlines for elem in textline])
     # remaining_elements =  chars_to_assign.difference(after_assignment)
@@ -618,7 +645,7 @@ def attempt_assign_small_to_nearest_text_element(fig, cc, mean_character_area, s
     :return: tuple (cc, nearest_neighbour) if close enough, else return None (inconclusive search)
     """
     mean_character_diagonal = np.sqrt(2 * mean_character_area)
-    expansion = int(2 * mean_character_diagonal)
+    expansion = int(3 * mean_character_diagonal)
     crop_region = Rect(cc.left-expansion, cc.right+expansion, cc.top-expansion, cc.bottom+expansion)
     cropped_img = crop_rect(fig.img, crop_region)
     if cropped_img['rectangle'] != crop_region:
@@ -629,21 +656,28 @@ def attempt_assign_small_to_nearest_text_element(fig, cc, mean_character_area, s
     ccs = label_and_get_ccs(Figure(cropped_img))
     # print(ccs)
     small_cc = True if cc.area < 1.2 * mean_character_area else False
-
     if small_cc:
+        # Calculate the separation between the small cc and the boundary of nearest cc which is approximated by
+        # separation minus half of diagonal length
         close_ccs= sorted([(other_cc, other_cc.separation(cc_in_shrunken_region))
-                             for other_cc in ccs if other_cc.area > 1.3 * cc.area], key=lambda elem: elem[1])
+                           for other_cc in ccs if other_cc.area > cc.area], key=lambda elem: elem[1])
+
         # Calculate separation, sort,
         # then choose the smallest non-zero (index 1) separation
-
+        # Check whether they share a textline?
         if len(close_ccs) > 1:
-            closest_cc = close_ccs[1]
+            vertical_overlap = [other_cc[0].overlaps_vertically(cc_in_shrunken_region) for other_cc in close_ccs]
+            print(vertical_overlap)
+            filtered_close_ccs =[cc for cc, overlap in zip(close_ccs, vertical_overlap) if overlap]
+            if not filtered_close_ccs:
+                return None
+            closest_cc = filtered_close_ccs[0]
         else:
+            log.info('No suitable neighbours were found to assign a small character cc')
             return None
 
-        if closest_cc[1] > 2 * mean_character_diagonal:
+        if closest_cc[1] > 1.5 * mean_character_diagonal:
             return None  # Too far away
-
         closest_cc_transformed = transform_panel_coordinates_to_expanded_rect(crop_region, fig.img, [closest_cc[0]])[0]
         return cc, closest_cc_transformed
 

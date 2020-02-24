@@ -16,15 +16,14 @@ main_rect = Rect(0, arr.shape[1], 0, arr.shape[0])
 
 def test_transform_panel_coordinates_to_parent_single_crop():
     crop_rectangle = Rect(10, 90, 15, 95)
-    #print(f'crop:{crop_rectangle}')
+    print(f'crop:{crop_rectangle}')
     cropped_img = crop_rect(arr, crop_rectangle)['img']
     # Find the same cc and transform back to the original cc, check if coordinates are the same
     labelled_crop = binary_tag(Figure(cropped_img))
     crop_ccs = get_bounding_box(labelled_crop)
-    #print(f'crop_ccs: {crop_ccs}')
+    print(f'crop_ccs: {crop_ccs}')
     trans_crop = transform_panel_coordinates_to_expanded_rect(crop_rectangle, main_rect, crop_ccs)
-    #print(f'after transforming: {trans_crop}')
-    assert ccs[0] == transform_panel_coordinates_to_expanded_rect(crop_rectangle, main_rect, crop_ccs)[0]
+    assert ccs[0] == trans_crop[0]
 
 
 def test_transform_panel_coordinates_to_parent_crop_of_a_crop():

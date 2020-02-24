@@ -182,6 +182,14 @@ class Rect(object):
         length = abs(self.center[1] - y)
         return np.hypot(length, height)
 
+    def overlaps_vertically(self, other_rect):
+        """
+        Return True if two `Rect` objects overlap along the vertical axis (i.e. when projected onto it), False otherwise
+        :param Rect other_rect: other `Rect` object for which a condition is to be tested
+        :return bool: True if overlap exists, False otherwise
+        """
+        return min(self.bottom, other_rect.bottom) > max(self.top, other_rect.top)
+
 
 class Panel(Rect):
     """ Tagged section inside Figure"""
@@ -252,7 +260,7 @@ class Figure(object):
 
 class TextLine(Panel):
 
-    def __init__(self, left, right, top, bottom, connected_components=None):
+    def __init__(self, left, right, top, bottom, connected_components=[]):
         self.text = None
         self._height = None
         self._width = None
@@ -273,10 +281,7 @@ class TextLine(Panel):
     @connected_components.setter
     def connected_components(self, value):   # Adjust bbox parameters when 'self._connected_components' are altered
         self._connected_components = value
-        self.left = np.min([cc.left for cc in self.connected_components])
-        self.right = np.max([cc.right for cc in self.connected_components])
-        self.top = np.min([cc.top for cc in self.connected_components])
-        self.bottom = np.max([cc.bottom for cc in self.connected_components])
+        self.adjust_boundaries()
 
 
     @property
@@ -295,10 +300,15 @@ class TextLine(Panel):
             return np.max([cc.right for cc in self.connected_components])\
                    - np.min([cc.left for cc in self.connected_components])
 
-
+    def adjust_boundaries(self):
+        self.left = np.min([cc.left for cc in self.connected_components])
+        self.right = np.max([cc.right for cc in self.connected_components])
+        self.top = np.min([cc.top for cc in self.connected_components])
+        self.bottom = np.max([cc.bottom for cc in self.connected_components])
 
     def append(self, element):
-        return self.connected_components.append(element)
+        self.connected_components.append(element)
+        self.adjust_boundaries()
 
 
 

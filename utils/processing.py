@@ -445,6 +445,7 @@ def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, 
     if not absolute:
         expanded_rect = Rect(0, 0, 0, 0) # This is just to simplify the function
     for cc in ccs:
+        cc = copy.deepcopy(cc) # to avoid side effects
         cls = type(cc)
         height = cc.bottom - cc.top
         width = cc.right - cc.left
@@ -482,6 +483,7 @@ def transform_panel_coordinates_to_shrunken_region(cropped_region, ccs):
                                 top=new_top, bottom=new_bottom))
 
     return new_panels
+
 
 
 
