@@ -7,7 +7,7 @@ from matplotlib.patches import Rectangle
 from pprint import pprint
 
 from utils.io import imread
-from utils.processing import erase_elements, preprocessing_remove_long_lines, get_bounding_box, create_megabox
+from utils.processing import erase_elements, preprocessing_remove_long_lines, get_bounding_box, flatten_list
 from conditions import find_reaction_conditions, get_conditions
 from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio,binary_tag)
 
@@ -52,13 +52,9 @@ for arrow in arrows:
     all_conditions.append(conditions)
     all_text.append(cond_text)
 
-f, ax = plt.subplots()
-ax.imshow(fig.img)
-for step in all_conditions:
-    for panel in step:
-        # print(f'panel-textline: {panel}')
-        rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
-        ax.add_patch(rect_bbox)
+cond_flat = [textline for conditions in all_conditions for textline in conditions]
+fig = erase_elements(fig, cond_flat)
+plt.imshow(fig.img)
 plt.show()
 
 

@@ -92,31 +92,37 @@ def read_label(fig, label, whitelist=LABEL_WHITELIST):
 
     return label, avg_conf
 
-def read_conditions(fig, conditions_region,whitelist=CONDITIONS_WHITELIST):
+def read_conditions(fig, textline,conf_threshold = 0.7, whitelist=CONDITIONS_WHITELIST):
     """
     Reads conditions' text in `fig.img` detected inside `textline` and returns the recognised OCR objects.
     :param Figure fig: figure containing unprocessed image
-    :param Panel conditions_region: Panel delimiting position of conditions' text
+    :param TextLine textline:  TextLine delimiting position of a single line of conditions' text
     :param str whitelist: all characters that will be looked for in the text
     :return: ?
     """
 
     img = convert_greyscale(fig.img)
-    cropped_img = crop_rect(img, conditions_region)
-    text = get_text(cropped_img['img'], x_offset=conditions_region.left, y_offset=conditions_region.top, psm=PSM.SINGLE_BLOCK, whitelist=whitelist)
-    raw_sentences = get_sentences(text)
+    text = []
 
-    if len(raw_sentences) is not 0:
+    print(f'line {textline}')
+    cropped_img = crop_rect(img, textline)
+    text = get_text(cropped_img['img'], x_offset=textline.left, y_offset=textline.top,
+                    psm=PSM.SINGLE_LINE, whitelist=whitelist)
+    raw_sentence = get_sentences(text)
+
+    if len(raw_sentence) == 1:
         # Tag each paragraph
-        tagged_sentences = [Sentence(sentence.strip(), word_tokenizer=ChemSchematicResolverTokeniser(),
-                                           parsers=[BaseParser()]) for sentence in raw_sentences]
+        tagged_sentence= Sentence(raw_sentence[0].strip(), word_tokenizer=ChemSchematicResolverTokeniser(),
+                                   parsers=[BaseParser()])
     else:
-        tagged_sentences = []
+        tagged_sentence = [] # TODO: Only one sentence (line) should be detected. Is this always the case?
 
+    log.debug('Tagged sentence: %s' % tagged_sentence)
     confidences = [t.confidence for t in text]
     avg_conf = np.mean(confidences)
-    log.info('Confidence in OCR: %s' % avg_conf)
-    return tagged_sentences, avg_conf
+    log.debug('Confidence in OCR: %s' % avg_conf)
+    return tagged_sentence if avg_conf > conf_threshold else []
+
 
 
 def read_isolated_conditions(isolated_block):
@@ -252,7 +258,7 @@ def get_sentences(blocks):
     return sentences
 
 
-def get_text(img, x_offset=0, y_offset=0, psm=PSM.AUTO, padding=20, whitelist=None, img_orientation=None):
+def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, whitelist=None, img_orientation=None):
     """Get text elements in image.
 
     When passing a cropped image to this function, use ``x_offset`` and ``y_offset`` to ensure the coordinate positions
@@ -336,7 +342,7 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.AUTO, padding=20, whitelist=No
         return common_props
 
     blocks = []
-    config = r'C:\Users\wilar\PycharmProjects\RDE\venv\tessdata\configs\bazaar.txt'
+
     with tesserocr.PyTessBaseAPI(psm=psm) as api:
         # api.SetVariable("segment_penalty_dict_nonword", "0")
         # api.SetVariable("segment_penalty_dict_frequent_word", "0")

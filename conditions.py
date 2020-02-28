@@ -22,6 +22,7 @@ from sklearn.neighbors import KernelDensity
 from sklearn.model_selection import GridSearchCV
 
 from actions import skeletonize_area_ratio
+from correct import Correct
 from models.reaction import Conditions
 from models.segments import Rect, Figure, TextLine
 from models.utils import Point
@@ -29,13 +30,13 @@ from utils.processing import approximate_line, create_megabox
 from utils.processing import (binary_tag, get_bounding_box, erase_elements, belongs_to_textline, is_boundary_cc,
 isolate_patch, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region,
                               label_and_get_ccs)
+
+
 from ocr import read_conditions, read_isolated_conditions
 from chemdataextractor.doc import Paragraph, Span
 from matplotlib.patches import Rectangle
 
 log = logging.getLogger(__name__)
-
-
 
 
 class ConditionParser:
@@ -80,42 +81,44 @@ class ConditionParser:
 
     @staticmethod
     def _identify_species(sentence):
-        formulae_identifies = r'(\(?\b(?:[A-Z][a-z]{0,2}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
+        formulae_identifiers = r'(\(?\b(?:[A-Z]{2,}[a-z]{0,2}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
         # letters between which some lowercase letters and digits are allows, optional brackets
         # cems = [cem.text for cem in cems]
-        other_identifiers = r'(?:^|[,])(?<!\w)\s?([A-Z]+)(?!\w)(?!\))'  # Up to four capital letters? Just a single one?
+        letter_base_identifiers = r'(\b[A-Z]{1,4}\b)'  # Up to four capital letters? Just a single one?
+
         number_identifiers = r'(?:^| )(?<!\w)([1-9])(?!\w)(?!\))(?:$|[, ])(?![A-Za-z])'
         # number_identifiers matches the following:
         # 1, 2, 3, three numbers as chemical identifiers
         # CH3OH, 5, 6 (5 equiv) 5 and 6 in the middle only
         # 5 5 equiv  first 5 only
         # A 5 equiv -no matches
-        entity_mentions_formulae = re.finditer(formulae_identifies, sentence.text)
-        entity_mentions_letters = re.finditer(other_identifiers, sentence.text)
+        entity_mentions_formulae = re.finditer(formulae_identifiers, sentence.text)
+        entity_mentions_letters = re.finditer(letter_base_identifiers, sentence.text)
+
         entity_mentions_numbers = re.finditer(number_identifiers, sentence.text)
+
         numbers_letters_span = [Span(e.group(1), e.start(), e.end()) for e in
                                 chain(entity_mentions_formulae, entity_mentions_numbers, entity_mentions_letters)]
+        print(f'spans: {numbers_letters_span}')
         all_mentions = [mention for mention in chain(entity_mentions_formulae, numbers_letters_span)
                         if mention]
+        print(f'all mentions:{all_mentions}')
         return all_mentions
 
     @staticmethod
     def _parse_coreactants(sentence):
-        cems = ConditionParser._identify_species(sentence)
-        print(f'cems: {cems}')
         co_values = ConditionParser.default_values
         co_str = re.compile(co_values + r'\s?' + ConditionParser.co_units)
-        return ConditionParser._find_closest_cem(cems, sentence, co_str) if cems else []   # ret value must be iterable
+
+        return ConditionParser._find_closest_cem(sentence, co_str)
 
 
     @staticmethod
     def _parse_catalysis(sentence):
-        cems = ConditionParser._identify_species(sentence)
-
         cat_values = ConditionParser.default_values
         cat_str = re.compile(cat_values + r'\s?' + ConditionParser.cat_units)
-        print(f'cems :{cems}')
-        return ConditionParser._find_closest_cem(cems, sentence, cat_str) if cems else []
+
+        return ConditionParser._find_closest_cem(sentence, cat_str)
 
     @staticmethod
     def _parse_other_species(sentence):
@@ -152,14 +155,29 @@ class ConditionParser:
         return other_dct
 
     @staticmethod
-    def _find_closest_cem(cems, sentence, parse_str):
-        matches = []
-        for entity in re.finditer(parse_str, sentence.text):
-            closest_cem = sorted([(cem, entity.start() - cem.start) for cem in cems if cem.start < entity.start()],
-                                 key=lambda x: x[1])[0]  # choose first (cem, distance) pair
-            closest_cem = closest_cem[0]   # choose cem from the pair
-            matches.append({'Species': closest_cem, 'Value': float(entity.group(1)), 'Units': entity.group(2)})
+    def _find_closest_cem(sentence, parse_str):
+        matches =[]
+        print(f'tokens: {sentence.tokens}')
+        for match in re.finditer(parse_str, sentence.text):
+            print(f'match: {match}')
+            match_start = match.group(1)
+            match_start_idx = [idx for idx, token in enumerate(sentence.tokens) if token.text == match_start][0]
+            print(f'text - 2 :{sentence.tokens[match_start_idx-2].text}')
+            length_condition = len(sentence.tokens[:match_start_idx]) >= 2
+            comma_splitting_condition = sentence.tokens[match_start_idx-2].text != ','
+            if length_condition and comma_splitting_condition:
+                species = sentence.tokens[match_start_idx - 2:match_start_idx]
+                species = ' '.join(token.text for token in species)
+            else:
+                species = sentence.tokens[match_start_idx - 1]
+
+
+            print(f'species: {species}')
+
+            matches.append({'Species': species, 'Value': float(match.group(1)), 'Units': match.group(2)})
+
         return matches
+
 
     @staticmethod
     def _parse_time(sentence):  # add conditions to add the parsed data
@@ -174,7 +192,6 @@ class ConditionParser:
             log.info('Time was not found for...')
 
     @staticmethod
-    # TODO: are 'rt' and 'heat' `values` or `units`?
     def _parse_temperature(sentence):
         # The following formals grammars for temperature and pressure are quite complex, but allow to parse additional
         # generic descriptors like 'heat' or 'UHV' in `.group(1)'
@@ -198,7 +215,6 @@ class ConditionParser:
 
 
     @staticmethod
-    # TODO: inconsistent assignment to `values` and `units` in pressure and temperature parsing
     def _parse_pressure(sentence):
         p_units = r'(?:m|h|k|M)?Pa|m?bar|atm'   # match bar, mbar, mPa, hPa, MPa and atm
 
@@ -235,8 +251,6 @@ class ConditionParser:
             log.info('Yield was not found for...')
 
 
-
-
 def get_conditions(fig, arrow, panels, scan_stepsize=10, scan_steps=10):
     """
 
@@ -248,41 +262,11 @@ def get_conditions(fig, arrow, panels, scan_stepsize=10, scan_steps=10):
     :return:
     """
     textlines = find_reaction_conditions(fig, arrow, panels, scan_stepsize, scan_steps)
-
-    recognised, conf = read_conditions(*prepare_text_block(fig, textlines))
-    print(recognised)
-    parser = ConditionParser(recognised)
+    recognised = [read_conditions(fig, line, conf_threshold=0.5) for line in textlines]
+    spell_checked = [Correct(line).correct_text() for line in recognised]
+    parser = ConditionParser(spell_checked)
     conditions_dct = parser.parse_conditions()
-    #
-    # conditions_dct = {'co_reactants': None, 'catalysts': None, 'other'}
-    # # Need to parse info to get a dictionary (or multiple) that will contain:
-    # # conditions like time or temperature - dictionary or individually? - dictionary better as some reactions have sparse
-    # # infor or none on these
-    # #second dictionary of chemicals?
-    # # with this approach - might be easier to separate into multiple dictionaries?
-    #
-    #
-    # print(f'recognised text: {recognised}')
-    # # for textline in textlines:
-    # #     recognised = read_conditions(erase_elements(fig, [arrow]),
-    # #                              textline)  # list of tuples (TextBlock, ocr_confidence)
-    # #     recognised_text.append(recognised)
-    # # print(f'recognised: {recognised_text}')
-    #
-    #
-    # # print(found_text)
-    #
-    # cems = identify_chemicals(recognised)
-    # chem_dct = contextualize_cems(recognised, cems)
-    # if not chem_dct.values():
-    #     log.warning(f'No chemicals were found when parsing conditions for step around arrow {arrow}')
-    #
-    # other_conditions = parse_other_conditions(re)
-    #
-    # pprint(chem_dct)
-    # pprint(other_conditions)
-    return None
-    return Conditions(textlines, chem_dct['catalysts'], chem_dct['co_reactants'], chem_dct['other'], other_conditions)
+    return Conditions(textlines, conditions_dct)
 
 
 
@@ -550,7 +534,6 @@ def assign_characters_proximity_search(img, chars_to_assign, textlines):
     :param textlines
     :return:
     """
-    print(f'textlines before small assigned: {textlines}')
     mixed_text_ccs = [char for textline in textlines for char in textline]
     mean_character_area = np.mean([char.area for char in mixed_text_ccs])
     for element in chars_to_assign:
@@ -561,12 +544,6 @@ def assign_characters_proximity_search(img, chars_to_assign, textlines):
                 if assigned_closest_cc in textline:
                     #to_filter_out.add(small_cc)
                     textline.append(small_cc)
-                    print(f'small cc appended: {small_cc}')
-    print(f'textlines after small assigned: {textlines}')
-    #sanity check:
-    # after_assignment = set([elem for textline in textlines for elem in textline])
-    # remaining_elements =  chars_to_assign.difference(after_assignment)
-    # print(f'remaining unassigned elements: {remaining_elements}')
 
     return textlines
 
@@ -667,7 +644,6 @@ def attempt_assign_small_to_nearest_text_element(fig, cc, mean_character_area, s
         # Check whether they share a textline?
         if len(close_ccs) > 1:
             vertical_overlap = [other_cc[0].overlaps_vertically(cc_in_shrunken_region) for other_cc in close_ccs]
-            print(vertical_overlap)
             filtered_close_ccs =[cc for cc, overlap in zip(close_ccs, vertical_overlap) if overlap]
             if not filtered_close_ccs:
                 return None
@@ -683,6 +659,3 @@ def attempt_assign_small_to_nearest_text_element(fig, cc, mean_character_area, s
 
     else:
         return None
-
-
-

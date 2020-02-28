@@ -2,12 +2,16 @@
 This file contains a pipeline necessary for OCR training. Images are pre-cropped to contain only relevant parts of
 chemical diagrams. They might contain arrows, but no parts of structures are allowed.
 The pipeline is to make sure that the images go through similar pre-processing steps compared to unseen data.
-
+Once each crop is split into its component text lines, a ground-truth text file is created for each line.
+For this purpose, a large text file `all_text` was created which contains all lines from all crops that had been
+manually typed. The file is split line by line to give one ground truth text file per each line represented as an image.
 """
 import copy
 import os
 import logging
 from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
 
 from utils.io import imread
 from utils.processing import label_and_get_ccs, crop_rect
@@ -16,6 +20,10 @@ from actions import find_solid_arrows, erase_elements
 from models.arrows import SolidArrow
 from models.segments import TextLine, Rect, Figure
 
+MAIN_DIR = os.getcwd()
+PATH = os.path.join(MAIN_DIR, 'images', 'tess_train_images', 'high_res', 'crops')
+PATH_TO_TEXT_FILE = os.path.join(MAIN_DIR, 'images', 'tess_train_images', 'high_res', 'crops', 'text')
+PADDING = 10  # This should be the same as in the OCR pre-processing step
 
 def prepare_text_for_ocr(fig,arrow):
     """
@@ -49,8 +57,6 @@ def prepare_text_for_ocr(fig,arrow):
     return text_candidate_buckets
 
 
-MAIN_DIR = os.getcwd()
-PATH = os.path.join(MAIN_DIR, 'images', 'tess_train_images', 'high_res', 'crops')
 for filename in os.listdir(PATH):
     p = os.path.join(PATH, filename)
 
@@ -63,16 +69,29 @@ for filename in os.listdir(PATH):
     arrows = find_solid_arrows(fig, thresholds=None, min_arrow_lengths=None)
 
 # Pass in the whole figure as a conditions region, no arrows
-    textlines = prepare_text_for_ocr(fig, [])
-
+    textlines = prepare_text_for_ocr(fig, arrows)
 
     original_name = filename.split('.')[0]
     for idx, textline in enumerate(textlines):
         cropped_textline = crop_rect(fig.img, textline)['img']
+
+        cropped_textline = np.pad(cropped_textline,PADDING,mode='constant')
         cropped_textline = Image.fromarray(cropped_textline)
+
         name = original_name + '_' + str(idx) + '.tif'
 
-        cropped_textline.save(PATH+'/lines/'+name)
+        cropped_textline.save(PATH+'/lines/'+ name)
+
+sorted_image_line_files = sorted(os.listdir(PATH+'/lines'))
+all_text_path = PATH + '/text/all_text.txt'
+# Create one text file per image of a text line
+# Iterate over lines of `all_text` and create one ground_truth file with a name corresponding the image text line
+with open(all_text_path, 'r') as all_text:
+    for line_image_file, line_text in zip(sorted_image_line_files, all_text):
+        ground_truth_text_filename = line_image_file.split('.')[0] + '.gt.txt'
+
+        with open(PATH +'/lines/' + ground_truth_text_filename, 'w') as ground_truth:
+            ground_truth.write(line_text)
 
 
 

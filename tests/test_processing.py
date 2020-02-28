@@ -3,7 +3,8 @@ import pytest
 import numpy as np
 
 from models.segments import Figure, Rect, Panel
-from utils.processing import transform_panel_coordinates_to_expanded_rect, binary_tag, get_bounding_box, crop_rect
+from utils.processing import (transform_panel_coordinates_to_expanded_rect, binary_tag,
+                              get_bounding_box, crop_rect, flatten_list)
 
 arr = np.zeros((100,100))
 arr[20:35,45:60] = 1
@@ -66,11 +67,24 @@ def test_transform_panel_coordinates_to_parent_crop_of_a_crop_absolute():
     subcrop_in_main_frame = Rect(crop_rectangle.left+subcrop_rectangle.left, crop_rectangle.right+subcrop_rectangle.right,
                                  crop_rectangle.top+subcrop_rectangle.top, crop_rectangle.bottom+subcrop_rectangle.bottom)
 
-    assert ccs[0] == transform_panel_coordinates_to_expanded_rect(subcrop_in_main_frame, main_rect, subcrop_ccs,absolute=True)[0]
+    assert ccs[0] == transform_panel_coordinates_to_expanded_rect(subcrop_in_main_frame, main_rect,
+                                                                  subcrop_ccs,absolute=True)[0]
 
+
+def test_flatten_list_ok():
+    arr1 = [1, 2, 3, 4]
+    arr2 = [6, 3 ,4, 5]
+    arr3 = [7, 8, 9, 10]
+    arr1.append(arr2)
+    arr3.append(arr1)
+    a = flatten_list(arr3)
+    print(a)
+    assert a == [7, 8, 9, 10, 1, 2, 3, 4, 6, 3, 4, 5]
 
 
 if __name__ == '__main__':
     test_transform_panel_coordinates_to_parent_single_crop()
     test_transform_panel_coordinates_to_parent_crop_of_a_crop()
     test_transform_panel_coordinates_to_parent_crop_of_a_crop_absolute()
+    test_flatten_data_structure_ok()
+    test_flatten_data_structure_set_ok()

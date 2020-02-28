@@ -1,7 +1,8 @@
 import copy
-from collections.abc import Container
+from collections.abc import Container, Iterable
 import math
 import numpy as np
+
 
 from scipy import ndimage as ndi
 from scipy.ndimage import label
@@ -142,6 +143,7 @@ def erase_elements(fig, elements):
         fig.img = img_no_elements
 
     except AttributeError:
+        print(f'elements: {elements}')
         for element in elements:
             #print(f'elements: {element}')
             fig.img[element.top:element.bottom, element.left:element.right] = 0
@@ -485,14 +487,20 @@ def transform_panel_coordinates_to_shrunken_region(cropped_region, ccs):
     return new_panels
 
 
+def flatten_list(data):
+    """
+    Flattens multi-level iterables into a list of elements
+    :param [[..]] data: multi-level iterable data structure to flatten
+    :return: flattened list of all elements
+    """
 
+    if len(data) == 0:
+        return data
 
+    if isinstance(data[0], Container):
+        return flatten_list(data[0]) + flatten_list(data[1:])
 
-
-
-
-
-
+    return data[:1] + flatten_list(data[1:])
 
 
 

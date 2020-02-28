@@ -71,12 +71,38 @@ class Conditions:
     This class describes conditions
     """
 
-    def __init__(self, text_lines, catalysts, co_reactants, other_species, other_conditions):
+    def __init__(self, text_lines, conditions_dct):
         self.text_lines = text_lines
-        self.catalysts = catalysts
-        self.co_reactants = co_reactants
-        self.other_species = other_species
-        self.other_conditions = other_conditions
+        self.conditions_dct = conditions_dct
+
+    @property
+    def co_reactants(self):
+        return self.conditions_dct['co-reactants']
+
+    @property
+    def catalysts(self):
+        return self.conditions_dct['catalysts']
+
+    @property
+    def other_species(self):
+        return self.conditions_dct['other species']
+
+    @property
+    def temperature(self):
+        return self.conditions_dct['temperature']
+
+    @property
+    def time(self):
+        return self.conditions_dct['time']
+
+    @property
+    def pressure(self):
+        return self.conditions_dct['pressure']
+
+    @property
+    def yield_(self):
+        return self.conditions_dct['yield']
+
 
 class Reactant(ChemicalStructure):
     """
