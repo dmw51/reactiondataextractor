@@ -6,7 +6,7 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 from math import sqrt
-
+from numpy import hypot
 import logging
 
 log = logging.getLogger((__name__))
@@ -21,6 +21,16 @@ class Point:
 
     def __repr__(self):
         return f'{self.__class__.__name__}{self.row, self.col}'
+
+    def dist(self, other):
+        """
+        Calculates distance between self and another point
+        :param other:
+        :return float: distance between two Points
+        """
+        drow = self.row - other.row
+        dcol = self.col - other.col
+        return hypot(drow, dcol)
 
 
 class Line:

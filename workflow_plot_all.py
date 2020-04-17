@@ -39,14 +39,43 @@ for file in os.listdir(PATH):
     arrows = find_solid_arrows(fig, thresholds=None, min_arrow_lengths=None)
     labelled = binary_tag(copy.deepcopy(fig))
     initial_ccs = get_bounding_box(labelled)
+    all_conditions_bboxes = []
     all_conditions = []
-    all_text = []
     for arrow in arrows:
-        conditions = find_reaction_conditions(fig, arrow, initial_ccs)
-        cond_text = get_conditions(fig, arrow, initial_ccs)
+        conditions_bboxes = find_reaction_conditions(fig, arrow, initial_ccs)
+        conditions = get_conditions(fig, arrow, initial_ccs)
+        all_conditions_bboxes.append(conditions_bboxes)
         all_conditions.append(conditions)
-        all_text.append(cond_text)
 
+
+
+    cond_flat = [textline for conditions in all_conditions_bboxes for textline in conditions]
+    fig_no_cond = erase_elements(fig, [*cond_flat, *arrows])
+    steps = scan_all_reaction_steps(fig_no_cond, arrows, all_conditions, initial_ccs, global_skel_pixel_ratio)
+    fig, ax = plt.subplots()
+    ax.imshow(fig_no_cond.img)
+    offset = 0
+    # for step in steps:
+    #
+    #     raw_reacts = step.reactants.connected_components
+    #     raw_prods = step.products.connected_components
+    #
+    #     # for panel in conditions:
+    #     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
+    #     #     ax.add_patch(rect_bbox)
+    #
+    #     for panel in raw_reacts:
+    #         rect_bbox = Rectangle((panel.left + offset, panel.top + offset), panel.right - panel.left,
+    #                               panel.bottom - panel.top, facecolor='none', edgecolor='m')
+    #         ax.add_patch(rect_bbox)
+    #
+    #     for panel in raw_prods:
+    #         rect_bbox = Rectangle((panel.left + offset, panel.top + offset), panel.right - panel.left,
+    #                               panel.bottom - panel.top, facecolor='none', edgecolor='r')
+    #         ax.add_patch(rect_bbox)
+    #     offset += 3
+    #
+    # plt.show()
     # fig_noarrows = erase_elements(fig, arrows)
     # fig_noconditions = erase_elements(fig_noarrows, [all_conditions])
     # plt.imshow(fig_noconditions.img)

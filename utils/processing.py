@@ -2,18 +2,21 @@ import copy
 from collections.abc import Container, Iterable
 import math
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 from scipy import ndimage as ndi
 from scipy.ndimage import label
-from scipy.ndimage import binary_closing
+from scipy.ndimage import binary_closing, binary_dilation
 from skimage.color import rgb2gray
 from skimage.measure import regionprops
-from skimage.morphology import disk, skeletonize
+from skimage.morphology import disk, skeletonize, rectangle
 from skimage.transform import probabilistic_hough_line
 from skimage.util import pad
 from skimage.util import crop as crop_skimage
 
+import cv2
+import imutils
 
 from models.utils import Line, Point
 from models.segments import Rect, Panel, Figure, TextLine
@@ -42,6 +45,8 @@ def crop(img, left=None, right=None, top=None, bottom=None):
     :return: Cropped image.
     :rtype: numpy.ndarray
     """
+
+
     height, width = img.shape[:2]
 
     left = max(0, left if left else 0)
@@ -88,8 +93,12 @@ def pixel_ratio(fig, diag):
 
     :return ratio: Float detailing ('on' pixels / bounding box area)
     """
-
-    cropped_img = crop(fig.img, left=diag.left, right=diag.right, top=diag.top, bottom=diag.bottom)
+    # if isinstance(fig.img, np.ndarray):
+    #     cropped_img = crop(fig.img, left=diag.left, right=diag.right, top=diag.top, bottom=diag.bottom)
+    # elif isinstance(fig.img, Panel):
+    #     cropped_img = crop_rect(fig)
+    cropped_img = crop_rect(fig.img, diag)
+    cropped_img = cropped_img['img']
     ones = np.count_nonzero(cropped_img)
     all_pixels = np.size(cropped_img)
     ratio = ones / all_pixels
@@ -108,14 +117,17 @@ def get_bounding_box(fig):
         panels.append(Panel(x1, x2, y1, y2, region.label - 1))# Sets tags to start from 0
     return set(panels)
 
+
 def binary_tag(fig):
     """ Tag connected regions with pixel value of 1
 
     :param fig: Input Figure
     :returns fig: Connected Figure
     """
+    fig = copy.deepcopy(fig)
     fig.img, no_tagged = ndi.label(fig.img)
     return fig
+
 
 def label_and_get_ccs(fig):
     """
@@ -126,8 +138,11 @@ def label_and_get_ccs(fig):
     labelled = binary_tag(fig)
     return get_bounding_box(labelled)
 
+
 def erase_elements(fig, elements):
     """
+    Erase elements from an image on a pixel-wise basis. if no `pixels` attribute, the function erases the whole
+    region inside the bounding box
     :param Figure fig: Figure object containing binarized image
     :param iterable of panels elements: list of elements to erase from image
     :return: copy of the Figure object with elements removed
@@ -143,13 +158,32 @@ def erase_elements(fig, elements):
         fig.img = img_no_elements
 
     except AttributeError:
-        print(f'elements: {elements}')
         for element in elements:
-            #print(f'elements: {element}')
-            fig.img[element.top:element.bottom, element.left:element.right] = 0
+            fig.img[element.top:element.bottom+1, element.left:element.right+1] = 0
 
     return fig
 
+def dilate_fragments(fig, skel_pixel_ratio):
+    """
+    Applies binary dilation to `fig.img` using a disk-shaped structuring element. Size of the element is determined by
+    the `skel_pixel_ratio`.
+    :param Figure fig: Processed figure
+    :param float skel_pixel_ratio: ratio of on/off pixels in `fig.img`
+    :return Figure: copy of `fig`
+    """
+
+    fig = copy.deepcopy(fig)
+
+    if skel_pixel_ratio > 0.01:
+        radius = 4
+    else:
+        radius = 6
+
+    selem = disk(radius)
+
+    fig.img = binary_dilation(fig.img, selem)
+
+    return fig
 
 
 def approximate_line(p1, p2):
@@ -216,6 +250,7 @@ def get_unclassified_ccs(all_ccs, *classified_ccs):
     :param iterable of sets classified_ccs: list of sets containing classified ccs
     :return set: remaining, unclassified components
     """
+
 
 def remove_small_fully_contained(connected_components):
     """
@@ -302,7 +337,8 @@ def remove_connected_component(cc, connected_components):
     connected_components.remove(cc)
     return connected_components
 
-def isolate_patch(fig, to_isolate):
+
+def isolate_patches(fig, to_isolate):
     """
     Creates an empty np.ndarray of shape `fig.img.shape` and populates it with pixels from `to_isolate`
     :param Figure fig: Figure object with binarized image
@@ -320,6 +356,7 @@ def isolate_patch(fig, to_isolate):
 
     return Figure(img=isolated)
 
+
 def postprocessing_close_merge(fig, to_close):
     """
     Isolate a set of connected components and close them using a small kernel.
@@ -329,7 +366,7 @@ def postprocessing_close_merge(fig, to_close):
     :param iterable of Panels to_close: a set or list of connected components to close
     :return: A smaller set of larger connected components
     """
-    isolated = isolate_patch(fig, to_close)
+    isolated = isolate_patches(fig, to_close)
     closed = binary_close(isolated, size=5)
     labelled = binary_tag(closed)
     panels = get_bounding_box(labelled)
@@ -448,7 +485,6 @@ def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, 
         expanded_rect = Rect(0, 0, 0, 0) # This is just to simplify the function
     for cc in ccs:
         cc = copy.deepcopy(cc) # to avoid side effects
-        cls = type(cc)
         height = cc.bottom - cc.top
         width = cc.right - cc.left
 
@@ -503,5 +539,110 @@ def flatten_list(data):
     return data[:1] + flatten_list(data[1:])
 
 
+def detect_rectangle_boxes(fig, greedy=False):
+    """
+    Detects rectangular and approximately rectangular (round edged) boxes, which can be further processed (included or
+    excluded). The boxes often contain auxiliary information which is not crucial for understanding.
+    :param Figure fig: Analysed figure
+    :param bool greedy: mode of `Rect` formation. if True, formed by taking extrema of polygonal approximation, averages
+    if False.
+    :return: list of detected rectangles
+    """
+    # convert to work with cv2
+    img = (fig.img * 255).astype('uint8')
+
+    resized = imutils.resize(img, width=2000)
+    ratio = img.shape[0] / float(resized.shape[0])
+    # convert the resized image to grayscale, blur it slightly,
+    # and threshold it
+    blurred = cv2.GaussianBlur(resized, (15, 15), 0)
+    cnts = cv2.findContours(blurred.copy(), cv2.RETR_EXTERNAL,
+                            cv2.CHAIN_APPROX_SIMPLE)
+    cnts = imutils.grab_contours(cnts)
+
+    rects = []
+
+    for c in cnts:
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.03 * peri, True)
+        if len(approx) == 4:
+            approx = approx.astype('float') * ratio
+            approx = approx.astype('int').reshape(4, -1)
+            rects.append(Rect.from_points(approx, greedy=greedy))
+
+    return rects
 
 
+def detect_headers(fig):
+    # Detects too much - also labels - need a reliable way to distinguish between the two (could use try block as safety net)
+    """
+    Attempts to detect header text in reaction schemes. This text usually contains additional, superfluous information.
+    :param Figure fig: Analysed figure
+    :return: iterable of connected components corresponding to header text (if any)
+    """
+
+    # Look at the LHS of image for any text (assume multiple headers for multiple reactions)
+    fig = copy.copy(fig)
+    right = int(fig.img.shape[1] * 0.05) if fig.img.shape[1] < 2000 else 100
+    # header_start_crop = crop(fig.img, left=0, right=right, top=0, bottom=fig.img.shape[0])['img']
+    ccs = label_and_get_ccs(fig)
+
+    header_start_cand = [cc for cc in ccs if cc.right < right]
+
+    plt.imshow(fig.img)
+    plt.show()
+    # print(f'headers: {headers}')
+    #(structures)
+
+    if not header_start_cand:
+        return
+
+    # For now, assume no labels were captured
+    detected_headers = []
+    print(f'candidate headers: {header_start_cand}')
+    for header in header_start_cand:
+        tol = int(header.height * 0.4)
+        # Crop a horizontal line containing the header start
+
+        header_line_cands = [cc for cc in ccs if cc.top > header.top-tol and cc.bottom < header.bottom+tol]
+        print(f'header candidates: {header_line_cands}')
+        isolated_line = isolate_patches(fig, header_line_cands)
+
+        closed_line = Figure(binary_dilation(isolated_line.img, structure=rectangle(1, 30)))  # close horizontally only
+        #that looked ugly, make a wrapper func to handle appropriate types?
+        plt.imshow(closed_line.img)
+        plt.title('dilated')
+        plt.show()
+        line_cc = label_and_get_ccs(closed_line)
+        line_cc = [cc for cc in line_cc if cc.overlaps(header)][0] # only take the one large cc that contains the
+        # original header cc
+        print(f'line cc: {line_cc}')
+        # the problem is with following line - I need to remove things I'm sure aren't headers (eg structures)
+        header_ccs = [cc for cc in ccs if line_cc.overlaps(cc) and cc.area < 3 * header.area] # to get rid of structures
+
+        if header_ccs not in detected_headers:
+            detected_headers.append(header_ccs)
+
+
+    return detected_headers
+
+
+    # Expand in horizontal direction around each found header start
+    # Close to find the whole header
+    # Check which ccs this corresponds to in the original image
+    # remove ccs in the text line
+
+
+def normalize_image(img):
+    """
+    Normalise image values to fit range between 0 and 1, and ensure it can be further proceseed. Useful e.g. after
+    blurring operation
+    :param np.ndarray img: analysed image
+    :return: np.ndarray - image with values scaled to fit inside the [0,1] range
+    """
+    min_val = np.min(img)
+    max_val = np.max(img)
+    img -= min_val
+    img /= (max_val - min_val)
+
+    return img

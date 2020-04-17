@@ -24,12 +24,17 @@ import logging
 import warnings
 
 import numpy as np
+import locale
+locale.setlocale(locale.LC_ALL, 'C')
 import tesserocr
+from skimage.morphology import skeletonize
+from skimage.transform import rescale
+from skimage.filters import gaussian
 
 from chemdataextractor.doc.text import Sentence
 from chemdataextractor.parse.cem import BaseParser
 from chemschematicresolver import decorators, io, model
-from utils.processing import convert_greyscale, crop, crop_rect, pad
+from utils.processing import convert_greyscale, crop, crop_rect, pad, normalize_image
 from chemschematicresolver.parse import ChemSchematicResolverTokeniser, LabelParser
 
 import matplotlib.pyplot as plt
@@ -43,11 +48,94 @@ SUBSCRIPT = '₁₂₃₄₅₆₇₈₉ₓ₋'
 SUPERSCRIPT = '⁰°'
 ASSIGNMENT = ':=-'
 CONCENTRATION = '%()<>'
+BRACKETS ='[]{}'
 SEPARATORS = ',. '
 OTHER = r'\'`/@'
 LABEL_WHITELIST = (ASSIGNMENT + DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION +
                    OTHER + SUBSCRIPT + SUPERSCRIPT + SEPARATORS)
-CONDITIONS_WHITELIST = DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION + SEPARATORS + SUBSCRIPT
+CONDITIONS_WHITELIST = DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION + SEPARATORS + BRACKETS + SUPERSCRIPT
+CHAR_WHITELIST = DIGITS + '+' + ALPHABET_UPPER
+
+OCR_CONFIDENCE = 0.7
+
+def choose_best_ocr_configuration(img, psms=[], invert=True, x_offset=0, y_offset=0, whitelist=None,pad_val=1):
+    """
+    Runs the ocr process for the specifies page segmentation modes. if `invert` is True, checks if ocr is better when
+    the image is inverted.
+    :param np.ndarray img: analysed image
+    :param [PSM,...] psms: list of all PSMs to try
+    :param bool invert: flag to process inverted image
+    :param int x_offset: the 'left' coordinate of bounding box of the 'img' in the main figure
+    :param int y_offset: the 'top' coordinate of bounding box of the 'img' in the main figure
+    :param str whitelist: whitelist for tesseract OCR process
+    :return[TextBlock,...]: raw ocr output with the highest confidence score
+    """
+
+    raw_results = []
+    for psm in psms:
+        text = get_text(img, x_offset=x_offset, y_offset=y_offset, psm=psm, whitelist=whitelist, pad_val=pad_val)
+        confidence = np.mean([ t.confidence for t in text]) if text else 0
+        raw_results.append([text, confidence])
+
+    if invert:
+        pad_val = 1-pad_val
+        img = img.astype(float)
+        max_val = np.max(img)
+        inverted_img = np.abs(max_val - img)
+
+        for psm in psms:
+            text = get_text(inverted_img, x_offset=x_offset, y_offset=y_offset, psm=psm, whitelist=whitelist, pad_val=pad_val)
+            confidence = np.mean([t.confidence for t in text]) if text else 0
+            raw_results.append([text, confidence])
+
+    raw_results.sort(key=lambda result: result[1], reverse=True)
+
+    print(f'all ocr results: {raw_results}')
+    text, avg_conf = raw_results[0]
+    print(f' ocr text: {text}')
+
+    return raw_results[0]
+
+def read_character(fig, diag, whitelist=CHAR_WHITELIST, pad_val=0):
+    """ Recognises a single character"""
+
+    img = convert_greyscale(fig.img)
+    cropped_img = crop(img, left=diag.left, right=diag.right, top=diag.top, bottom=diag.bottom)
+    # plt.imshow(cropped_img['img'])
+    # plt.show()
+    # cropped_img = skeletonize(cropped_img['img'])
+    cropped_img = pad(cropped_img['img'], (10, 10))
+    #cropped_img = pad(cropped_img, (10, 10))
+    # plt.imshow(cropped_img)
+    # plt.show()
+    # # cropped_img = skeletonize(cropped_img)
+    # modes = ['reflect', 'constant', 'nearest', 'mirror', 'wrap']
+    # f, ax = plt.subplots(5)
+    # for i, mode in enumerate(modes):
+    #     cropped_img = gaussian(cropped_img,sigma=0.5, mode='mirror')
+    #     text = get_text(cropped_img, x_offset=diag.left, y_offset=diag.top, psm=PSM.SINGLE_CHAR, whitelist=whitelist)
+    #     if text:
+    #         char = get_words(text)[0]
+    #     print(f' recognised: {char}, conf: {char.confidence}, mode: {mode}')
+    #     ax[i].imshow(cropped_img)
+    #     ax[i].set_title(mode)
+    # plt.show()
+
+
+    cropped_img = gaussian(cropped_img, sigma=0.5, mode='nearest')
+    # print(f'whitelist :{whitelist}')
+    # plt.imshow(cropped_img)
+    # plt.title('blurred')
+    # plt.show()
+    text, _ = choose_best_ocr_configuration(cropped_img, x_offset=diag.left, y_offset=diag.top,
+                                            psms=[PSM.SINGLE_CHAR, PSM.SPARSE_TEXT],
+                                            whitelist=whitelist, pad_val=pad_val)
+    if text:
+        char = get_words(text)[0]
+
+        if char.confidence > OCR_CONFIDENCE:
+            return char
+
 
 def read_diag_text(fig, diag, whitelist=LABEL_WHITELIST):
     """ Reads a diagram using OCR and returns the textual OCR objects"""
@@ -92,7 +180,8 @@ def read_label(fig, label, whitelist=LABEL_WHITELIST):
 
     return label, avg_conf
 
-def read_conditions(fig, textline,conf_threshold = 0.7, whitelist=CONDITIONS_WHITELIST):
+
+def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CONDITIONS_WHITELIST, pad_val=0):
     """
     Reads conditions' text in `fig.img` detected inside `textline` and returns the recognised OCR objects.
     :param Figure fig: figure containing unprocessed image
@@ -102,24 +191,29 @@ def read_conditions(fig, textline,conf_threshold = 0.7, whitelist=CONDITIONS_WHI
     """
 
     img = convert_greyscale(fig.img)
-    text = []
 
-    print(f'line {textline}')
     cropped_img = crop_rect(img, textline)
-    text = get_text(cropped_img['img'], x_offset=textline.left, y_offset=textline.top,
-                    psm=PSM.SINGLE_LINE, whitelist=whitelist)
+    cropped_img = pad(cropped_img['img'], (10, 10))
+    cropped_img = gaussian(cropped_img, sigma=0.5, mode='nearest')
+    # plt.imshow(cropped_img)
+    # plt.title('cropped condition text line')
+    # plt.show()
+    # print(f'max of crop: {np.max(cropped_img)}')
+    # print(f'min of crop: {np.min(cropped_img)}')
+    cropped_img = normalize_image(cropped_img)
+
+    text, avg_conf = choose_best_ocr_configuration(cropped_img, x_offset=textline.left, y_offset=textline.top,
+                                            psms=[PSM.SINGLE_CHAR], whitelist=whitelist, pad_val=pad_val)
     raw_sentence = get_sentences(text)
 
     if len(raw_sentence) == 1:
         # Tag each paragraph
-        tagged_sentence= Sentence(raw_sentence[0].strip(), word_tokenizer=ChemSchematicResolverTokeniser(),
+        tagged_sentence = Sentence(raw_sentence[0].strip(), word_tokenizer=ChemSchematicResolverTokeniser(),
                                    parsers=[BaseParser()])
     else:
         tagged_sentence = [] # TODO: Only one sentence (line) should be detected. Is this always the case?
 
     log.debug('Tagged sentence: %s' % tagged_sentence)
-    confidences = [t.confidence for t in text]
-    avg_conf = np.mean(confidences)
     log.debug('Confidence in OCR: %s' % avg_conf)
     return tagged_sentence if avg_conf > conf_threshold else []
 
@@ -258,7 +352,7 @@ def get_sentences(blocks):
     return sentences
 
 
-def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, whitelist=None, img_orientation=None):
+def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, whitelist=None, img_orientation=None, pad_val=1):
     """Get text elements in image.
 
     When passing a cropped image to this function, use ``x_offset`` and ``y_offset`` to ensure the coordinate positions
@@ -278,6 +372,8 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, white
         'get_text: %s x_offset=%s, y_offset=%s, padding=%s, whitelist=%s',
         img.shape, x_offset, y_offset, padding, whitelist
     )
+    # Rescale image - make it larger
+    img = rescale(img, 2.0, order=1, anti_aliasing=True, multichannel=False)
 
     # Add a buffer around the entire input image to ensure no text is too close to edges
     img_padding = 10
@@ -287,10 +383,11 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, white
         npad = ((img_padding, img_padding), (img_padding, img_padding))
     else:
         raise ValueError('Unexpected image dimensions')
-    img = np.pad(img, pad_width=npad, mode='constant', constant_values=0)
-    plt.imshow(img)
-    plt.show()
+    img = np.pad(img, pad_width=npad, mode='constant', constant_values=pad_val)
     shape = img.shape
+    # plt.imshow(img)
+    # plt.title('padded, resized rde')
+    # plt.show()
 
     # Rotate img before sending to tesseract if an img_orientation has been given
     if img_orientation == Orientation.PAGE_LEFT:

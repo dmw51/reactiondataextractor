@@ -4,12 +4,15 @@ from itertools import product, chain
 
 import logging
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 from scipy.ndimage import label
 from scipy.signal import find_peaks
 from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize as skeletonize_skimage
-
+from sklearn.neighbors import NearestNeighbors
+from sklearn.cluster import DBSCAN
 
 from config import get_area
 from models.arrows import SolidArrow
@@ -18,11 +21,12 @@ from models.reaction import ReactionStep,Conditions,Reactant,Product,Intermediat
 from models.segments import Rect, Panel, Figure, TextLine
 from models.utils import Point, Line
 from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill, pad
-from utils.processing import binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, belongs_to_textline, is_boundary_cc
-
+from utils.processing import (binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, \
+                              belongs_to_textline, is_boundary_cc, label_and_get_ccs, isolate_patches)
+from ocr import read_character
 
 log = logging.getLogger(__name__)
-log.setLevel(logging.WARNING)
+log.setLevel(logging.DEBUG)
 
 formatter = logging.Formatter('%(levelname)s:%(name)s: %(message)s')
 file_handler = logging.FileHandler('actions.log')
@@ -78,7 +82,7 @@ def segment(bin_fig, arrows):
         log.debug("Segmentation kernel size = %s" % kernel)
 
     # Using a binary floodfill to identify panel regions
-    fill_img = binary_floodfill(bin_fig)
+    fill_img = binary_floodfill(closed_fig)
     tag_img = binary_tag(fill_img)
     panels = get_bounding_box(tag_img)
 
@@ -87,6 +91,9 @@ def segment(bin_fig, arrows):
     width_threshold = bin_fig.get_bounding_box().width / 150
     panels = [panel for panel in panels if panel.area > area_threshold or panel.width > width_threshold]
     return set(panels)
+
+
+
 
 def skeletonize(fig):
     """
@@ -99,6 +106,7 @@ def skeletonize(fig):
 
     return fig
 
+
 def skeletonize_area_ratio(fig, panel):
     """ Calculates the ratio of skeletonized image pixels to total number of pixels
     :param fig: Input figure
@@ -108,7 +116,6 @@ def skeletonize_area_ratio(fig, panel):
 
     skel_fig = skeletonize(fig)
     return pixel_ratio(skel_fig, panel)
-
 
 
 def find_solid_arrows(fig, thresholds=None,min_arrow_lengths=None):
@@ -179,15 +186,22 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
     :return iterable: List of ReactionStep objects containing assigned connected components
     """
     steps =[]
-    control_set = set()
+    fig = copy.deepcopy(fig)
+    closed_panels = segment(fig, all_arrows)
+    # f, ax = plt.subplots()
+    # ax.imshow(fig.img)
+    # for panel in closed_panels:
+    #     offset=0
+    #     rect_bbox = Rectangle((panel.left+offset, panel.top+offset),
+    #     panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
+    #     ax.add_patch(rect_bbox)
+    # plt.show()
+    for idx, arrow in enumerate(all_arrows):
+        ccs_reacts_prods = find_step_reactants_and_products(fig, all_conditions[idx], arrow, all_arrows, closed_panels)
 
-    for idx,arrow in enumerate(all_arrows):
-        ccs_reacts_prods = find_step_reactants_and_products(fig,all_conditions[idx],arrow,all_arrows,panels)
+        panels_dict = assign_to_nearest(closed_panels, ccs_reacts_prods['all_ccs_reacts'], ccs_reacts_prods['all_ccs_prods'])
 
-        panels_dict = assign_to_nearest(panels,ccs_reacts_prods['all_ccs_reacts'],ccs_reacts_prods['all_ccs_prods'])
-
-        #control_set.update(*(value for value in panels_dict.values())) # The unpacking looks ugly
-
+        first_step_flag = ccs_reacts_prods['first step']
         reacts = panels_dict['reactants']
         prods = panels_dict['products']
         print(f'panels_dict: {panels_dict}')
@@ -196,26 +210,28 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
         #     prods = postprocessing_close_merge(fig, prods)
         #     log.debug('Postprocessing closing and merging finished.')
 
-        reacts=Reactant(connected_components=reacts)
-        prods = Product(connected_components=prods)
-        steps.append(ReactionStep(arrow,reacts,prods))
-        #print('panels:', panels)
+        reacts = [Reactant(connected_components=react) for react in reacts]
+        prods = [Product(connected_components=prod) for prod in prods]
+        steps.append(ReactionStep(arrow, reacts, prods, all_conditions[idx], first_step_flag))
+        # print('panels:', panels)
     # if control_set != panels:
     #     log.warning('Some connected components remain unassigned following scan_all_reaction_steps.')
     # else:
     #     log.info('All connected components have been assigned following scan_all_reaction steps.')
     return steps
 
+
 def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrows, panels, stepsize=30):
     """
     :param Figure fig: figure object being processed
-    :param iterable conditions: a list of bounding boxes containing conditions
+    :param Conditions step_conditions: an object containing `text_lines` representing conditions connected components
     :param Arrow step_arrow: Arrow object connecting the reactants and products
-    :param iterable all_arrow: a list of all arrows found
+    :param iterable all_arrows: a list of all arrows found
     :return: a list of all conditions bounding boxes
     """
     log.info('Looking for reactants and products around arrow %s', step_arrow)
-    megabox_ccs = copy.deepcopy(step_conditions)
+    first_step = False
+    megabox_ccs = copy.deepcopy(step_conditions.text_lines)
     megabox_ccs.add(step_arrow)
     megabox = create_megabox(megabox_ccs)
     top_left = Point(row=megabox.top, col=megabox.left)
@@ -270,6 +286,8 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
             log.debug('breaking at iteration %s'% i)
             break
         raw_reacts.update([panel for panel in panels if panel.overlaps(line)])
+    else:
+        first_step = True
     log.info('Found the following connected components of reactants: %s' % raw_reacts)
 
     # Find products
@@ -291,7 +309,8 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
             break
         raw_prods.update([panel for panel in panels if panel.overlaps(line)])
     log.info('Found the following connected components of prods: %s ' % raw_prods)
-    return  {'all_ccs_reacts':raw_reacts, 'all_ccs_prods':raw_prods}
+    return {'all_ccs_reacts':raw_reacts, 'all_ccs_prods':raw_prods, 'first step': first_step}
+
 
 def assign_to_nearest(all_ccs, reactants, products, threshold=None):
     """
@@ -304,14 +323,13 @@ def assign_to_nearest(all_ccs, reactants, products, threshold=None):
     :param iterable products: List of products' panels of a reaction step
     :return dictionary: The modified groups
     """
-    return {'reactants':reactants, 'products':products}
-    #
+
     log.debug('Assigning connected components based on distance')
     #print('assign: conditions set: ', conditions)
     classified_ccs = set((*reactants, *products))
     #print('diagonal lengths: ')
     #print([cc.diagonal_length for cc in classified_ccs])
-    threshold = np.mean(([cc.diagonal_length for cc in classified_ccs]))
+    threshold =  0.5 * np.mean(([cc.diagonal_length for cc in classified_ccs]))
     unclassified =  all_ccs.difference(classified_ccs)
     for cc in unclassified:
         classified_ccs = sorted(classified_ccs, key=lambda elem: elem.separation(cc))
@@ -322,96 +340,167 @@ def assign_to_nearest(all_ccs, reactants, products, threshold=None):
                 group.add(cc)
                 log.info('assigning %s to group %s based on distance' % (cc, group))
 
-
     return {'reactants':reactants, 'products':products}
 
 
-# def find_small_characters(cropped_figure, ccs,threshold_size=None):
-#     # Currently not used
-#     if threshold_size is None:
-#         threshold_size = np.mean([cc.area for cc in ccs])/2
-#
-#     small_characters = [cc for cc in ccs if cc.area < threshold_size]
-#
-#     return set(small_characters)
+def remove_redundant_characters(fig, ccs, chars_to_remove=None):
+    """
+    Removes reduntant characters such as '+' and '[', ']' from an image to facilitate resolution of diagrams and labels.
+    This function takes in `ccs` which are ccs to be considered. It then closes all connected components in `fig.img1
+    and compares connected components in `ccs` and closed image. This way, text characters belonging to structures are
+    not considered.
+    :param iterable ccs: iterable of Panels containing species to check
+    :param chars_to_remove: characters to be removed
+    :return: list connected components containing redundant characters
+    """
+    # TODO: Store closed image globally and use when needed?
+    if chars_to_remove is None:
+        chars_to_remove = '+[]'
+
+    closed = binary_close(fig, size=3)
+    closed_ccs = label_and_get_ccs(closed)
+    ccs_to_consider = set(ccs).intersection(set(closed_ccs))
+    f, ax = plt.subplots()
+    ax.imshow(closed.img)
+    for panel in ccs_to_consider:
+        rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',
+                              edgecolor='r')
+        ax.add_patch(rect_bbox)
+    plt.show()
+
+    diags_to_erase = []
+    for cc in ccs_to_consider:
+        text_word = read_character(fig, cc)
+
+        if text_word:
+            text = text_word.text
+            print(f'recognised char: {text}')
+
+            if any(redundant_char is text for redundant_char in chars_to_remove):
+                diags_to_erase.append(cc)
+
+    return erase_elements(fig, diags_to_erase)
 
 
-# def attempt_fit_textline(cropped_figure, main_textlines):
-#     img = cropped_figure.img
-#
-#     main_textlines_top = np.min([textline.top for textline in main_textlines])
-#     main_textlines_bottom = np.max([textline.bottom for textline in main_textlines])
-#     mean_main_textline_height = np.mean([textline.height for textline in main_textlines])
-#     mean_main_textline_center_horizontal = np.mean([textline.center[0] for textline in main_textlines])
-#
-#     crop_top_region = Rect(left=0, right=img.shape[1],
-#                            top=0, bottom=main_textlines_top)
-#
-#     crop_bottom_region = Rect(left=0, right=img.shape[1],
-#                            top=main_textlines_bottom, bottom=img.shape[0])
-#
-#     top_text_buckets = fit_textline_locally(cropped_figure,crop_top_region)
-#     bottom_text_buckets = fit_textline_locally(cropped_figure, crop_bottom_region)
-#     if not (top_text_buckets or bottom_text_buckets):
-#         return None
-#     print(f'top buckets: {top_text_buckets}')
-#     print(bool(top_text_buckets))
-#     print(f'bottom buckets: {bottom_text_buckets}')
-#     print(bool(bottom_text_buckets))
-#     text_candidate_buckets = [*top_text_buckets, *bottom_text_buckets]
-#     tolerance = 10 # pixels
-#     additional_conditions_text_buckets =[]
-#     for bucket in text_candidate_buckets:
-#         mean_new_textline_center_horizontal = np.mean([elem.center[0] for elem in bucket])
-#         mean_new_textline_height = np.mean([elem.height for elem in bucket])
-#         cond1 = abs(mean_new_textline_center_horizontal - mean_main_textline_center_horizontal) <= tolerance
-#         cond2 = abs(mean_new_textline_height - mean_main_textline_height) <= tolerance
-#         if cond1 and cond2:
-#             additional_conditions_text_buckets.append(bucket)
-#
-#     return additional_conditions_text_buckets
-#
-#
-#     # Perform kmeans with the following features
-#     #difference height - mean_textline height?
-#     #bottom
-#     #varying number of clusters between 1 and 4?
-#     #restricting cluster centre to around middle of the line (img.shape[1]//2)
-#     height_squared_residuals = np.array([(cc.height - mean_textline_height)**2 for cc in unclassified_ccs]).reshape(-1,1)
-#     bottom_boundaries_squared = np.array([cc.bottom**2 for cc in unclassified_ccs]).reshape(-1,1)
-#     print(f'bottom boundaries: {bottom_boundaries}')
-#     data = np.hstack((height_squared_residuals,bottom_boundaries))
-#     print(f'data: {data}')
+def remove_redundant_square_brackets(fig, ccs):
+    """
+    Remove large, redundant square brackets, containing e.g. reaction conditions. These are not captured when parsing
+    conditions' text (taller than a text line).
+    :param Figure fig: Analysed figure
+    :param [Panels] ccs: Iterable of Panels to consider for removal
+    :return: Figure with square brackets removed
+    """
+    candidate_ccs = filter(lambda cc: cc.aspect_ratio > 5 or cc.aspect_ratio < 1 / 5, ccs)
 
+    detected_lines = 0
+    bracket_ccs = []
 
-# def fit_textline_locally(main_crop, subcrop_region):
-#     cropped_region = crop_rect(main_crop.img, subcrop_region)
-#     if cropped_region['rectangle'] != subcrop_region:
-#         subcrop_region = cropped_region['rectangle']
-#
-#     cropped_img = cropped_region['img']
-#     ccs = label_and_get_ccs(Figure(cropped_img))
-#     plt.imshow(cropped_img)
-#     plt.title('attempt_fit_textline')
-#     plt.show()
-#     print(f'ccs: {ccs}')
-#     print(f'len ccs: {len(ccs)}')
-#     if len(ccs) < 2:
-#         return []
-#
-#     upper, lower = identify_textlines(ccs, cropped_img)
-#
-#     new_textlines = [TextLine(left=0, right=subcrop_region.right, top=top_line, bottom=bottom_line)
-#                      for top_line, bottom_line in zip(upper, lower)]
-#     text_candidate_buckets = assign_characters_to_textlines(
-#         cropped_img, new_textlines, ccs, transform_from_crop=True,crop_rect=subcrop_region)
-#
-#     return text_candidate_buckets
+    # transform
+    for cc in candidate_ccs:
+        cc_fig = isolate_patches(fig,
+                                 [cc])  # Isolate appropriate connected components in preparation for Hough
+        # plt.imshow(cc_fig.img)
+        # plt.show()
+        line_length = (cc.width + cc.height) * 0.5  # since length >> width or vice versa, this is equal to ~0.8*length
+        line = probabilistic_hough_line(cc_fig.img, line_length=int(line_length))
+        if line:
+            detected_lines += 1
+            bracket_ccs.append(cc)
+
+    print(bracket_ccs)
+    if len(bracket_ccs) % 2 == 0:
+        fig = erase_elements(fig, bracket_ccs)
+
+    return fig
 
 
 
+def match_function_and_smiles(reaction_step, smiles):
+    """
+    Matches the resolved smiles from chemschematicresolver to functions (reactant, product) found by the segmentation
+    algorithm.
+
+    :param ReactionStep reaction_step: object containing connected components classified as `reactants` or `products`
+    :param [[smile], [ccs]l] smiles: list of lists containing structures converted into SMILES format and recognised
+     labels, and connected components depicting the structures in an image
+    :return: Mutated ReactionStep object - with optically recognised structures as SMILES and labels/auxiliary text
+    """
+
+    for reactant in reaction_step.reactants:
+        matching_record = [recognised for recognised, diag in zip(*smiles) if diag == reactant.connected_components]
+        # This __eq__ is based on a flaw in csr - cc is of type `Label`, but inherits from Rect
+        if matching_record:
+            matching_record = matching_record[0]
+            reactant.label = matching_record[0]
+            reactant.smiles = matching_record[1]
+        else:
+            log.warning('No SMILES match was found for a reactant structure')
+
+    for product in reaction_step.products:
+
+        matching_record = [recognised for recognised, cc in zip(*smiles) if cc == product.connected_components]
+        # This __eq__ is based on flaw in csr - cc is of type `Label`, but inherits from Rect
+        if matching_record:
+            matching_record = matching_record[0]
+            product.label = matching_record[0]
+            product.smiles = matching_record[1]
+        else:
+            log.warning('No SMILES match was found for a product structure')
 
 
+def detect_structures(fig, ccs):
+    """
+    Detects structures based on parameters such as size, aspect ratio and on/off pixel ratio
 
+    :param Figure fig: analysed figure
+    :param [Panels[ ccs: list of all connected components
+    :return [Panels]: list of connected components classified as structures
+    """
+    # There are only two possible classes here: structures and text - arrows are excluded (for now?)
+    size = np.asarray([cc.area**2 for cc in ccs], dtype=float)
+    aspect_ratio = [cc.aspect_ratio for cc in ccs]
+    aspect_ratio = np.asarray([ratio + 1 / ratio for ratio in aspect_ratio],
+                              dtype=float)  # Transform to weigh wide
+    print('aspect ratio: \n', aspect_ratio)
+    plt.hist(aspect_ratio)
+    plt.show()
 
+    # and tall structures equally (as opposed to ratios around 1)
+    pixel_ratios = np.asarray([pixel_ratio(fig, cc) for cc in ccs])
+    data = np.vstack((size, aspect_ratio, pixel_ratios))
+    data = np.transpose(data)
+    print(np.mean(data, axis=0))
+    print(np.std(data, axis=0))
+    data -= np.mean(data, axis=0)
+    data /= np.std(data, axis=0)
+    data[:,2] = np.power(data[:, 2], 3)
+    # data[:, 2] = np.power(data[:, 2], 3)
+    f, ax = plt.subplots(2,2)
+    print(sorted(data[:,0]))
+    ax[0,0].scatter(data[:,0],data[:,1])
+    ax[0,1].scatter(data[:,1], data[:,2])
+    ax[1,0].scatter(data[:,0], data[:,2])
+    plt.show()
+    # print('size: \n', size)
 
+    # print('pixel ratio: \n', pixel_ratio)
+    #
+    print(f'data:')
+    # print(data)
+    # print(data.shape)
+    #labels = KMeans(n_clusters=2, n_init=20).fit_predict(data)
+    eps = np.sum(np.std(data, axis=0))
+
+    neigh = NearestNeighbors(n_neighbors=2)
+    nbrs = neigh.fit(data)
+    distances, indices = nbrs.kneighbors(data)
+    distances = np.sort(distances, axis=0)
+    distances = distances[:, 1]
+    print('distances: \n', distances)
+    _, bins, _ = plt.hist(distances)
+    plt.show()
+    eps = bins[1]
+    labels = DBSCAN(min_samples=5,eps=eps).fit_predict(data)
+    #labels = OPTICS().fit_predict(data)
+    print(labels)
+    return ccs, labels

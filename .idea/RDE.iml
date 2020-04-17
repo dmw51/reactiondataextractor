@@ -11,8 +11,6 @@
     <option name="requirementsPath" value="" />
   </component>
   <component name="PyDocumentationSettings">
-    <option name="format" value="REST" />
-    <option name="myDocStringFormat" value="reStructuredText" />
     <option name="renderExternalDocumentation" value="true" />
   </component>
 </module>

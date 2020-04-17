@@ -20,35 +20,45 @@ class BaseReactionClass(object):
     """
 
 
+class Reaction(BaseReactionClass):
+    @classmethod
+    def from_reaction_steps(cls, steps):
+        """
+        Given reactions steps forming the reaction, return a Reaction object with steps ordered in a list
+
+        :param [ReactionStep,...] steps: list of all involved reaction steps
+        :return: Reactio object - an iterator over the reaction steps
+        """
+        ordered_steps = []
+        first_step = [step for step in steps if step.first][0]
+        # TODO: Exception handling for above
+        ordered_steps.append(first_step)
+
+        compare_to_step = first_step
+        changes = True
+        while changes:
+            changes = False
+            for step in steps:
+
+                if set(step.reactants) == set(compare_to_step.products):
+                    changes = True
+                    ordered_steps.append(step)
+                    compare_to_step = step
+
+        return Reaction(steps=ordered_steps)
+
+    def __init__(self, steps):
+        self.steps = steps
+
+
 class ChemicalStructure(BaseReactionClass):
     """
     This is a base class for chemical structures species found in diagrams (e.g. reactants and products)
     """
     def __init__(self, connected_components):
         self.connected_components = connected_components
-            #remove_small_fully_contained(connected_components)
-
-        # while True:
-        #     merged = []
-        #     for cc1 in previous_container:
-        #         for cc2 in previous_container:
-        #             if cc1.overlaps(cc2) and cc1 != cc2:
-        #                 print('cc1 in m list', cc1 in merging_list)
-        #                 print(cc1)
-        #                 merging_list.remove(cc1)
-        #                 merging_list.remove(cc2)
-        #                 merged = merge_rect(cc1, cc2)
-        #                 merging_list.add(merged)
-        #                 print('merged in mlist:, ', merged in merging_list)
-        #                 cc1 = merged
-
-        #     if len(merging_list) == len(previous_container):
-        #         print('merging complete')
-        #         break
-        #     previous_container = merging_list
-        #
-        # print('---')
-        # self.connected_components = merged
+        self.smiles = None
+        self.label = None
 
     def __iter__(self):
         return iter(self.connected_components)
@@ -59,16 +69,21 @@ class ReactionStep(BaseReactionClass):
     This class describes elementary steps in a reaction.
     """
 
-    def __init__(self, arrow, reactants, products, conditions):
+    def __init__(self, arrow, reactants, products, conditions, first):
         self.arrow = arrow,
         self.reactants = reactants
         self.products = products
         self.conditions = conditions
+        self._first = first   #  internal flag to indicate first step in a reaction
+
+    @property
+    def first(self):
+        return self._first
 
 
 class Conditions:
     """
-    This class describes conditions
+    This class describes conditions region and associated text
     """
 
     def __init__(self, text_lines, conditions_dct):

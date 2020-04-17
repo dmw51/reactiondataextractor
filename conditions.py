@@ -21,14 +21,14 @@ from sklearn.cluster import DBSCAN
 from sklearn.neighbors import KernelDensity
 from sklearn.model_selection import GridSearchCV
 
-from actions import skeletonize_area_ratio
+from actions import skeletonize_area_ratio, detect_structures
 from correct import Correct
 from models.reaction import Conditions
 from models.segments import Rect, Figure, TextLine
 from models.utils import Point
 from utils.processing import approximate_line, create_megabox
 from utils.processing import (binary_tag, get_bounding_box, erase_elements, belongs_to_textline, is_boundary_cc,
-isolate_patch, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region,
+                              isolate_patches, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region,
                               label_and_get_ccs)
 
 
@@ -81,7 +81,8 @@ class ConditionParser:
 
     @staticmethod
     def _identify_species(sentence):
-        formulae_identifiers = r'(\(?\b(?:[A-Z]{2,}[a-z]{0,2}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
+
+        formulae_identifiers = r'(?<!°)(\(?\b(?:[A-Z]+[a-z]{0,2}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
         # letters between which some lowercase letters and digits are allows, optional brackets
         # cems = [cem.text for cem in cems]
         letter_base_identifiers = r'(\b[A-Z]{1,4}\b)'  # Up to four capital letters? Just a single one?
@@ -99,11 +100,11 @@ class ConditionParser:
 
         numbers_letters_span = [Span(e.group(1), e.start(), e.end()) for e in
                                 chain(entity_mentions_formulae, entity_mentions_numbers, entity_mentions_letters)]
-        print(f'spans: {numbers_letters_span}')
+
         all_mentions = [mention for mention in chain(entity_mentions_formulae, numbers_letters_span)
                         if mention]
-        print(f'all mentions:{all_mentions}')
-        return all_mentions
+
+        return list(set(all_mentions))
 
     @staticmethod
     def _parse_coreactants(sentence):
@@ -157,22 +158,19 @@ class ConditionParser:
     @staticmethod
     def _find_closest_cem(sentence, parse_str):
         matches =[]
-        print(f'tokens: {sentence.tokens}')
+
         for match in re.finditer(parse_str, sentence.text):
-            print(f'match: {match}')
             match_start = match.group(1)
             match_start_idx = [idx for idx, token in enumerate(sentence.tokens) if token.text == match_start][0]
-            print(f'text - 2 :{sentence.tokens[match_start_idx-2].text}')
+
             length_condition = len(sentence.tokens[:match_start_idx]) >= 2
-            comma_splitting_condition = sentence.tokens[match_start_idx-2].text != ','
-            if length_condition and comma_splitting_condition:
+            comma_delimiter_condition = sentence.tokens[match_start_idx-2].text != ','
+
+            if length_condition and comma_delimiter_condition:
                 species = sentence.tokens[match_start_idx - 2:match_start_idx]
                 species = ' '.join(token.text for token in species)
             else:
                 species = sentence.tokens[match_start_idx - 1]
-
-
-            print(f'species: {species}')
 
             matches.append({'Species': species, 'Value': float(match.group(1)), 'Units': match.group(2)})
 
@@ -186,7 +184,6 @@ class ConditionParser:
         time_str = re.compile(r'(?<!\w)' + t_values + r'\s?' + t_units + r'(?=$|\s?,)')
         time = re.search(time_str, sentence.text)
         if time:
-            print(time)
             return {'Value': float(time.group(1)), 'Units': time.group(2)}
         else:
             log.info('Time was not found for...')
@@ -195,7 +192,7 @@ class ConditionParser:
     def _parse_temperature(sentence):
         # The following formals grammars for temperature and pressure are quite complex, but allow to parse additional
         # generic descriptors like 'heat' or 'UHV' in `.group(1)'
-        t_units = r'\s?0C|\wC|K'   # match 0C, oC and similar, as well as K
+        t_units = r'\s?(?:o|O|0|°)C|K'   # match 0C, oC and similar, as well as K
 
         t_value1 = r'\d{1,4}' + r'\s?(?=' + t_units + ')'  # capture numbers only if followed by units
         t_value2 = r'rt'
@@ -246,7 +243,7 @@ class ConditionParser:
             try:
                 return {'Value': float(y.group(1)), 'Units': units}
             except ValueError:
-                return {'Value': y.group(1), 'Units': units}   # if value is gram scale
+                return {'Value': y.group(1), 'Units': units}   # if value is 'gram scale'
         else:
             log.info('Yield was not found for...')
 
@@ -262,32 +259,12 @@ def get_conditions(fig, arrow, panels, scan_stepsize=10, scan_steps=10):
     :return:
     """
     textlines = find_reaction_conditions(fig, arrow, panels, scan_stepsize, scan_steps)
-    recognised = [read_conditions(fig, line, conf_threshold=0.5) for line in textlines]
-    spell_checked = [Correct(line).correct_text() for line in recognised]
+    recognised = [read_conditions(fig, line, conf_threshold=0.6) for line in textlines]
+    print(f'recognised text: {recognised}')
+    spell_checked = [Correct(line).correct_text() for line in recognised if line]
     parser = ConditionParser(spell_checked)
     conditions_dct = parser.parse_conditions()
     return Conditions(textlines, conditions_dct)
-
-
-
-
-
-
-
-
-
-def prepare_text_block(fig, textlines):
-    """
-    This function isolates all connected components identified as relevant text characters and outputs the new Figure
-    object as well as the Panel defining the region
-    :param fig:
-    :param textlines:
-    :return:
-    """
-    isolated_block = isolate_patch(fig, (char for textline in textlines for char in textline.connected_components))
-    panel = create_megabox([char for textline in textlines for char in textline.connected_components])
-
-    return isolated_block, panel
 
 
 def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
@@ -301,11 +278,14 @@ def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
     :param float global_skel_pixel_ratio: value describing density of on-pixels in a graph
     :param int stepsize: integer value decribing size of step between two line scanning operations
     """
-    panels = [panel for panel in panels if panel.area < 55**2]
+    # panels = [panel for panel in panels if panel.area < 55**2]  # Is this necessary?
+
     arrow = copy.deepcopy(arrow)
     sorted_pts_col = sorted(arrow.line, key= lambda pt: pt.col)
     p1, p2 = sorted_pts_col[0], sorted_pts_col[-1]
-    # Squeeze the two points in the second dimension to avoid overlap with structures on either side
+
+    arrow_length = p1.dist(p2)
+    shrink_constant = int(arrow_length/(2*steps))
 
     overlapped = set()
     rows = []
@@ -319,8 +299,8 @@ def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
 
         for step in range(steps):
             # Reduce the scanned area proportionally to distance from arrow
-            p1_scancol = int(p1_scancol * 1.01) # These changes dont work as expected - need to check them
-            p2_scancol = int(p2_scancol * .99)
+            p1_scancol += shrink_constant # These changes dont work as expected - need to check them
+            p2_scancol -= shrink_constant  #  int(p2_scancol * .99)
 
             # print('p1: ',p1_scanrow,p1.col)
             # print('p2: ', p2_scanrow,p2.col)
@@ -336,43 +316,50 @@ def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
                 overlapped.update(overlapping_panels)
                 boredom_index = 0
             else:
-                boredom_index +=1
+                boredom_index += 1
 
-            if boredom_index >= 5: # Nothing found in the last five steps
+            if boredom_index >= 5:  # Nothing found in the last five steps
                 break
     # print(f'rows: {rows}')
     # print(f'cols: {columns}')
     # plt.imshow(fig.img, cmap=plt.cm.binary)
     # plt.scatter(columns, rows, c='y', s=1)
-    # plt.savefig('destination_path.jpg', format='jpg', dpi=1000)
+    # # plt.savefig('destination_path.jpg', format='jpg', dpi=1000)
     # plt.show()
 
-    conditions_text = scan_conditions_text2(fig,overlapped,arrow)
+    conditions_text = scan_conditions_text(fig, overlapped, arrow)
 
     return set(conditions_text) # Return as a set to allow handling along with product and reactant sets
 
 
-def scan_conditions_text2(fig, conditions, arrow):
+def scan_conditions_text(fig, conditions, arrow, debug=False):
     """
     Crops a larger area around raw conditions to look for additional text elements that have
     not been correctly recognised as conditions
     :param Figure fig: analysed figure with binarised image object
     :param iterable of Panels conditions: set or list of raw conditions (output of `find_reaction_conditions`)
+    :padam bool debug: debugging mode on/off - enables additional plotting
     :return: Set of Panels containing all recognised conditions
     """
 
     fig = copy.deepcopy(fig)
     fig = erase_elements(fig, [arrow]) # erase arrow at the very beginning
-    extended_boundary_vertical = 150
-    extended_boundary_horizontal = 75
+
     conditions_box = create_megabox(conditions)
+    # print(f'height: {conditions_box.height}, width: {conditions_box.width}')
+    extended_boundary_vertical = conditions_box.height
+    extended_boundary_horizontal = 75
 
     search_region = Rect(conditions_box.left-extended_boundary_horizontal, conditions_box.right+extended_boundary_horizontal,
                conditions_box.top-extended_boundary_vertical, conditions_box.bottom+extended_boundary_vertical)
     # print(f'search region: {search_region}')
     crop_dct = crop_rect(fig.img, search_region)
-    if crop_dct['rectangle'] != search_region:
-        search_region = crop_dct['img']
+    search_region = crop_dct['img']  # keep the rectangle boundaries in the other key
+
+
+    # print('running scan text!')
+    # plt.imshow(search_region)
+    # plt.show()
 
     initial_ccs_transformed = transform_panel_coordinates_to_shrunken_region(crop_dct['rectangle'],conditions)
     search_region = attempt_remove_structure_parts(search_region, initial_ccs_transformed)
@@ -382,13 +369,14 @@ def scan_conditions_text2(fig, conditions, arrow):
     textlines = [TextLine(0, search_region.img.shape[1], upper, lower)
                  for upper, lower in zip(top_boundaries, bottom_boundaries)]
 
-    # f, ax = plt.subplots()
-    # ax.imshow(search_region.img)
-    # for line in top_boundaries:
-    #    ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='r')
-    # for line in bottom_boundaries:
-    #    ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='b')
-    # plt.show()
+    if debug:
+        f, ax = plt.subplots()
+        ax.imshow(search_region.img)
+        for line in top_boundaries:
+           ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='r')
+        for line in bottom_boundaries:
+           ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='b')
+        plt.show()
 
     # print(f'textlines:{textlines}')
     text_candidate_buckets = assign_characters_to_textlines(search_region.img, textlines, ccs)
@@ -417,6 +405,13 @@ def scan_conditions_text2(fig, conditions, arrow):
 
 
 def attempt_remove_structure_parts(cropped_img, text_ccs):
+    """
+    Attempt to remove parts of structures from a cropped region containing conditions text.
+    :param np.ndarray cropped_img: array representing the cropped region
+    :param [Panels] text_ccs: text connected components detected during the raw line scan stage
+    :return np.ndarray: crop without the structure parts
+    """
+
     crop_no_letters = erase_elements(Figure(cropped_img),text_ccs)
     # f, ax = plt.subplots()
     # ax.imshow(crop_no_letters.img)
@@ -428,7 +423,16 @@ def attempt_remove_structure_parts(cropped_img, text_ccs):
     # plt.show()
     # skel_pixel_ratio = skeletonize_area_ratio(Figure(cropped_img),Rect(0,cropped_img.shape[1], 0, cropped_img.shape[0]))
     # print(f'the skel-pixel ratio is {skel_pixel_ratio}')
-    closed = binary_dilation(crop_no_letters.img,selem=disk(4)) #Decide based on skel-pixel ratio
+    ccs = label_and_get_ccs(crop_no_letters)
+    # print(ccs)
+    # print(f'type of ccs: {type(ccs)}')
+    # detect_structures(Figure(cropped_img), ccs)
+    skel_pixel_ratio = skeletonize_area_ratio(crop_no_letters, crop_no_letters.get_bounding_box()) # currently not used
+
+    # print(f'skel_pixel ratio: {skel_pixel_ratio}')
+    closed = binary_dilation(crop_no_letters.img,selem=disk(3)) #Decide based on skel-pixel ratio
+    # plt.imshow(closed)
+    # plt.show()
     labelled = binary_tag(Figure(closed))
     ccs = get_bounding_box(labelled)
     structure_parts = [cc for cc in ccs if is_boundary_cc(cropped_img,cc)]
@@ -553,6 +557,7 @@ def isolate_full_text_block(textlines, arrow):
     mean_textline_height = np.mean([textline.height for textline in textlines])
     # char_areas = [elem.area for elem in mixed_text_elements]
     # mean_char_area = np.mean(char_areas)
+    # std_area = np.std(char_areas)
     # std_area = np.std(char_areas)
     # data = np.array([(*elem.center, elem.area) for elem in mixed_text_elements]).reshape(-1,3)
     data = [textline.center for textline in textlines]

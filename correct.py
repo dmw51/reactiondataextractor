@@ -19,6 +19,7 @@ class Correct:
         if isinstance(text, Sentence):
             text = text.text
 
+
         if not isinstance(text, str):
             raise TypeError('Text for correction must be of string type.')
 

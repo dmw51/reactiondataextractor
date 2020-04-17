@@ -39,6 +39,42 @@ class Rect(object):
     Base class for all panels.
     """
 
+    @classmethod
+    def from_points(cls, points, greedy=False):
+        """
+        Create a rectangle given 4 points. Points can be either an iterable of (x,y) tuples (note order),
+        np.ndarray of (x,y) or iterable of `Points`.
+        note: this method will produce unexpected output if more than 4 points are supplied.
+        :param [(x,y),...] or [Point,...] points: iterable of points from which a `Rect` is constructed
+        :param bool greedy: if True, the extrema of approximated polygon are taken, averages if False
+        :return: formed `Rect`
+        """
+        is_valid_tuple = all(isinstance(elem, tuple) and len(elem) == 2 for elem in points)
+        is_valid_ndarray = all(isinstance(elem, np.ndarray) and len(elem) == 2 for elem in points)
+
+        if is_valid_tuple or is_valid_ndarray:
+            rows = [elem[1] for elem in points]
+            cols = [elem[0] for elem in points]
+
+        elif all(isinstance(elem, Point) for elem in points):
+            rows = [elem.row for elem in points]
+            cols = [elem.col for elem in points]
+
+        else:
+            raise TypeError('Only `Point` objects or tuples of coordinate pairs are allowed.')
+
+        rows.sort()
+        cols.sort()
+        # Take average of each pair to account for imperfections in polygonal approximation
+        if greedy:
+            top, bottom = rows[0], rows[3]
+            left, right = cols[0], cols[3]
+        else:
+            top, bottom = sum(rows[:2])/2, sum(rows[2:])/2
+            left, right = sum(cols[:2])/2, sum(cols[2:])/2
+
+        return cls(int(left), int(right), int(top), int(bottom))
+
     # Order in init changes to match that in skimage measure.regionprops.bbox
     def __init__(self, left, right, top, bottom):
         """
@@ -228,7 +264,13 @@ class Figure(object):
         :param list[Photo] photos: List of photos.
         """
         self.img = img
-        self.width, self.height = img.shape[0], img.shape[1]
+
+        if isinstance(img, np.ndarray):
+            self.width, self.height = img.shape[0], img.shape[1]
+        elif isinstance(img, Rect):
+            self.width = img.right-img.left
+            self.height = img.bottom - img.top
+
         self.center = (int(self.width * 0.5), int(self.height) * 0.5)
         self.panels = panels
         self.plots = plots

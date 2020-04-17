@@ -5,14 +5,21 @@ import copy
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from pprint import pprint
+from PIL import Image, ImageOps
 
+from models.segments import Figure
+from models.reaction import Reaction
 from utils.io import imread
-from utils.processing import erase_elements, preprocessing_remove_long_lines, get_bounding_box, flatten_list
+from utils.processing import erase_elements, preprocessing_remove_long_lines, binary_close, get_bounding_box, flatten_list, label_and_get_ccs, detect_headers, detect_rectangle_boxes
 from conditions import find_reaction_conditions, get_conditions
-from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio,binary_tag)
+from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio,binary_tag,
+                     remove_redundant_characters, match_function_and_smiles, remove_redundant_square_brackets)
+from skimage.morphology import binary_closing, disk
+
+import chemschematicresolver as csr
 
 import logging
-level = 'WARNING'
+level = 'DEBUG'
 # create logger
 logger = logging.getLogger('project')
 logger.setLevel(logging.DEBUG)
@@ -32,37 +39,96 @@ logger.addHandler(ch)
 
 MAIN_DIR = os.getcwd()
 PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'Easy', 'high_res')
+# PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'Uncropped')
 # for file in os.listdir(PATH):
-filename = 'ja9b13071_0003.jpeg'
+filename = '10.1021_jacs.9b12546_1.jpg'
 p = os.path.join(PATH, filename)
 fig = imread(p)
 labelled = binary_tag(copy.deepcopy(fig))
 initial_ccs = get_bounding_box(labelled)
 global_skel_pixel_ratio = skeletonize_area_ratio(fig, fig.get_bounding_box())
 arrows = find_solid_arrows(fig, thresholds=None, min_arrow_lengths=None)
-plt.imshow(fig.img)
-plt.show()
 
+# ### TEMP
+# fig_no_arrows = erase_elements(fig, arrows)
+# # fig_no_arrows_closed = Figure(binary_closing(fig_no_arrows.img,selem=disk(2)))
+# temp_ccs = label_and_get_ccs(fig_no_arrows)
+# ccs, labels = detect_structures(fig_no_arrows, temp_ccs)
+# f, ax = plt.subplots()
+# colours = ['b', 'm', 'y','r']
+# ax.imshow(fig_no_arrows.img, cmap='binary')
+# for idx, panel in enumerate(temp_ccs):
+#     #
+#     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none', edgecolor=colours[labels[idx]])
+#     ax.add_patch(rect_bbox)
+#
+# plt.show()
+# ###
+
+all_conditions_bboxes = []
 all_conditions = []
-all_text = []
 for arrow in arrows:
-    conditions = find_reaction_conditions(fig, arrow, initial_ccs)
-    cond_text = get_conditions(fig, arrow, initial_ccs)
-    pprint(cond_text)
+    conditions_bboxes = find_reaction_conditions(fig, arrow, initial_ccs)
+    conditions = get_conditions(fig, arrow, initial_ccs)
+    pprint(conditions)
+    all_conditions_bboxes.append(conditions_bboxes)
     all_conditions.append(conditions)
-    all_text.append(cond_text)
 
-cond_flat = [textline for conditions in all_conditions for textline in conditions]
-fig = erase_elements(fig, cond_flat)
-plt.imshow(fig.img)
+cond_flat = [textline for conditions in all_conditions_bboxes for textline in conditions]
+fig_no_cond = erase_elements(fig, [*cond_flat,*arrows])
+
+leftover_ccs = label_and_get_ccs(fig_no_cond)
+fig_clean = remove_redundant_characters(fig_no_cond, leftover_ccs)
+fig_clean = remove_redundant_square_brackets(fig_clean, leftover_ccs)
+#headers = detect_headers(binary_close(fig_clean, 5))
+#boxes = detect_rectangle_boxes(fig_clean, greedy=True)
+#print(f'boxes: {boxes}')
+#print(f'headers: {headers}')
+#fig_clean = erase_elements(fig_clean, flatten_list(headers) + boxes)
+
+steps = scan_all_reaction_steps(fig_clean, arrows, all_conditions, initial_ccs, global_skel_pixel_ratio)
+fig, ax = plt. subplots()
+
+
+ax.imshow(fig_clean.img)
 plt.show()
+# for step in steps:
+#     offset = 0
+#     raw_reacts = step.reactants.connected_components
+#     raw_prods = step.products.connected_components
+#
+#     # for panel in conditions:
+#     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
+#     #     ax.add_patch(rect_bbox)
+#
+#     for panel in raw_reacts:
+#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
+#         ax.add_patch(rect_bbox)
+#
+#     for panel in raw_prods:
+#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
+#         ax.add_patch(rect_bbox)
+# plt.show()
+processed = Image.fromarray(fig_clean.img).convert('RGB')
+processed = ImageOps.invert(processed)
 
+processed.save(PATH+'/processed'+'.tif')
 
+csr_out, diags_ccs_ordered = csr.extract_image_rde(PATH+'/processed.tif', debug=True, allow_wildcards=True)
+print(f'csr out: {csr_out}')
+print(f'ordered diags: {diags_ccs_ordered}')
 
+print(f'end here: {steps[0]}')
+print(steps[0].reactants[0])
+result = csr_out, diags_ccs_ordered
+for step in steps:
+    match_function_and_smiles(step, result)
+    for product in step.products:
+        print(f'step: {step}, product: {vars(product)}')
+    for reactant in step.reactants:
+        print(f'step: {step}, reactant: {vars(reactant)}')
 
-
-
-
+reaction = Reaction.from_reaction_steps(steps)
 
 
 
