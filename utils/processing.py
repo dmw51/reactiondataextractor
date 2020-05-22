@@ -646,3 +646,17 @@ def normalize_image(img):
     img /= (max_val - min_val)
 
     return img
+
+def standardize(data):
+    """
+    Standardizes data to mean 0 and standard deviation of 1
+    :param np.ndarray data: array of data
+    :return np.ndarray: standardized data array
+    """
+    if data.dtype != 'float':
+        data = data.astype('float')
+    feature_mean = np.mean(data, axis=0)
+    feature_std = np.std(data, axis=0)
+    data -= feature_mean
+    data /= feature_std
+    return data

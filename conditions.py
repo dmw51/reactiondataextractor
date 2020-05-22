@@ -60,7 +60,7 @@ class ConditionParser:
     def parse_conditions(self):
         parse_fns = [ConditionParser._parse_coreactants, ConditionParser._parse_catalysis,
                      ConditionParser._parse_other_species, ConditionParser._parse_other_conditions]
-        conditions_dct = {'catalysts': None, 'co-reactants': None, 'other species': None, 'temperature':None,
+        conditions_dct = {'catalysts': None, 'coreactants': None, 'other species': None, 'temperature':None,
                           'pressure': None, 'time': None, 'yield': None}
         coreactants_lst = []
         catalysis_lst = []
@@ -73,7 +73,7 @@ class ConditionParser:
             other_species_lst.extend(parsed[2])
             conditions_dct.update(parsed[3])
 
-        conditions_dct['co-reactants'] = coreactants_lst
+        conditions_dct['coreactants'] = coreactants_lst
         conditions_dct['catalysts'] = catalysis_lst
         conditions_dct['other species'] = other_species_lst
         pprint(conditions_dct)
@@ -85,7 +85,7 @@ class ConditionParser:
         formulae_identifiers = r'(?<!°)(\(?\b(?:[A-Z]+[a-z]{0,2}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
         # letters between which some lowercase letters and digits are allows, optional brackets
         # cems = [cem.text for cem in cems]
-        letter_base_identifiers = r'(\b[A-Z]{1,4}\b)'  # Up to four capital letters? Just a single one?
+        letter_base_identifiers = r'((?<!°)\b[A-Z]{1,4}\b)'  # Up to four capital letters? Just a single one?
 
         number_identifiers = r'(?:^| )(?<!\w)([1-9])(?!\w)(?!\))(?:$|[, ])(?![A-Za-z])'
         # number_identifiers matches the following:
@@ -124,7 +124,6 @@ class ConditionParser:
     @staticmethod
     def _parse_other_species(sentence):
         cems = ConditionParser._identify_species(sentence)
-
         other_species_if_end = r'(?:,|\.|$|\s)\s?(?!\d)'
 
         other_species = []
@@ -132,7 +131,7 @@ class ConditionParser:
             species_str = re.compile('(' + cem.text + ')' + other_species_if_end)
             species = re.search(species_str, sentence.text)
             if species and species.group(1) == cem.text:
-                other_species.append(cem)
+                other_species.append(cem.text)
 
         return other_species
 
@@ -157,7 +156,7 @@ class ConditionParser:
 
     @staticmethod
     def _find_closest_cem(sentence, parse_str):
-        matches =[]
+        matches = []
 
         for match in re.finditer(parse_str, sentence.text):
             match_start = match.group(1)
@@ -320,16 +319,30 @@ def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
 
             if boredom_index >= 5:  # Nothing found in the last five steps
                 break
-    # print(f'rows: {rows}')
-    # print(f'cols: {columns}')
+    print(f'rows: {rows}')
+    print(f'cols: {columns}')
+    # f = plt.figure(figsize=(20,20))
+    # ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
+    # ax.imshow(fig.img, cmap=plt.cm.binary)
+    # pairs = list(zip(rows, columns))
+    # for i in range(0,len(rows)-1,2):
+    #     p1 = pairs[i]
+    #     p2 = pairs[i+1]
+    #     y, x = list(zip(*[p1, p2]))
+    #
+    #     ax.plot(x, y, 'r')
+    # ax.axis('off')
+    # plt.savefig('diamond2.tif')
+
+
     # plt.imshow(fig.img, cmap=plt.cm.binary)
     # plt.scatter(columns, rows, c='y', s=1)
-    # # plt.savefig('destination_path.jpg', format='jpg', dpi=1000)
+    # plt.savefig('destination_path.jpg', format='jpg', dpi=1000)
     # plt.show()
 
     conditions_text = scan_conditions_text(fig, overlapped, arrow)
 
-    return set(conditions_text) # Return as a set to allow handling along with product and reactant sets
+    return conditions_text # Return as a set to allow handling along with product and reactant sets
 
 
 def scan_conditions_text(fig, conditions, arrow, debug=False):
@@ -343,7 +356,7 @@ def scan_conditions_text(fig, conditions, arrow, debug=False):
     """
 
     fig = copy.deepcopy(fig)
-    fig = erase_elements(fig, [arrow]) # erase arrow at the very beginning
+    fig = erase_elements(fig, [arrow])  # erase arrow at the very beginning
 
     conditions_box = create_megabox(conditions)
     # print(f'height: {conditions_box.height}, width: {conditions_box.width}')
@@ -357,31 +370,40 @@ def scan_conditions_text(fig, conditions, arrow, debug=False):
     search_region = crop_dct['img']  # keep the rectangle boundaries in the other key
 
 
+
     # print('running scan text!')
     # plt.imshow(search_region)
-    # plt.show()
+    plt.show()
 
     initial_ccs_transformed = transform_panel_coordinates_to_shrunken_region(crop_dct['rectangle'],conditions)
     search_region = attempt_remove_structure_parts(search_region, initial_ccs_transformed)
+
     ccs = label_and_get_ccs(search_region)
     top_boundaries, bottom_boundaries = identify_textlines(ccs, search_region.img)
 
     textlines = [TextLine(0, search_region.img.shape[1], upper, lower)
                  for upper, lower in zip(top_boundaries, bottom_boundaries)]
 
-    if debug:
-        f, ax = plt.subplots()
-        ax.imshow(search_region.img)
-        for line in top_boundaries:
-           ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='r')
-        for line in bottom_boundaries:
-           ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='b')
-        plt.show()
-
-    # print(f'textlines:{textlines}')
+    # f = plt.figure(figsize=(20, 20))
+    # ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
+    # ax.imshow(search_region.img, cmap=plt.cm.binary)
+    # for line in top_boundaries:
+    #    ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='b')
+    # for line in bottom_boundaries:
+    #    ax.plot([i for i in range(search_region.img.shape[1])],[line for i in range(search_region.img.shape[1])],color='r')
+    #
+    #
+    # # print(f'textlines:{textlines}')
     text_candidate_buckets = assign_characters_to_textlines(search_region.img, textlines, ccs)
-    # print(f'example textline ccs: {text_candidate_buckets[0].connected_components}')
+    # # print(f'example textline ccs: {text_candidate_buckets[0].connected_components}')
     mixed_text_candidates = [element for textline in text_candidate_buckets for element in textline]
+    # for panel in mixed_text_candidates:
+    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='r',edgecolor='b', alpha=0.35)
+    #     ax.add_patch(rect_bbox)
+    #
+    # plt.savefig('cond_chars_initial.tif')
+    #plt.show()
+
 
 
     remaining_elements = set(ccs).difference(mixed_text_candidates)
@@ -475,11 +497,12 @@ def identify_textlines(ccs,img):
     heights = [cc.bottom - cc.top for cc in ccs]
     mean_height = np.mean(heights, dtype=np.uint32)
     kde_lower, _ = find_peaks(logp, distance=mean_height*1.2)
-    kde_lower.sort()
-    # plt.plot(rows, logp)
+    # kde_lower.sort()
+    # plt.plot(rows, logp, 'r')
     # plt.xlabel('Row')
     # plt.ylabel('logP(textline)')
-    # plt.scatter(kde_lower, [0 for elem in kde_lower])
+    # plt.scatter(kde_lower, [0 for elem in kde_lower], c='r', marker='+')
+    # plt.savefig('kde_2.tif')
     # plt.show()
     line_buckets = []
     for peak in kde_lower:

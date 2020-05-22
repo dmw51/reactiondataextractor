@@ -12,7 +12,7 @@ from scipy.signal import find_peaks
 from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize as skeletonize_skimage
 from sklearn.neighbors import NearestNeighbors
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, KMeans
 
 from config import get_area
 from models.arrows import SolidArrow
@@ -22,7 +22,7 @@ from models.segments import Rect, Panel, Figure, TextLine
 from models.utils import Point, Line
 from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill, pad
 from utils.processing import (binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, \
-                              belongs_to_textline, is_boundary_cc, label_and_get_ccs, isolate_patches)
+                              belongs_to_textline, is_boundary_cc, label_and_get_ccs, isolate_patches, standardize)
 from ocr import read_character
 
 log = logging.getLogger(__name__)
@@ -141,7 +141,7 @@ def find_solid_arrows(fig, thresholds=None,min_arrow_lengths=None):
     return arrows
 
 
-def find_solid_arrows_main_routine(fig,threshold=None, min_arrow_length=None):
+def find_solid_arrows_main_routine(fig, threshold=None, min_arrow_length=None):
     """
     This function takes in a binary figure object and aims to find all solid arrows.
     :param Figure fig: input figure objext
@@ -154,6 +154,13 @@ def find_solid_arrows_main_routine(fig,threshold=None, min_arrow_length=None):
     #print(lines)
     labelled_img, _ = label(img)
     arrows =[]
+    # plt.imshow(fig.img, cmap=plt.cm.binary)
+    # line1 = list(zip(*lines[0]))
+    # line2 = list(zip(*lines[1]))
+    # plt.plot(line1[0], line1[1])
+    # plt.plot(line2[0], line2[1])
+    # plt.axis('off')
+    # plt.show()
     for l in lines:
         points = [Point(row=y, col=x) for x, y in l]
         # Choose one of points to find the label and pixels in the image
@@ -187,7 +194,26 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
     """
     steps =[]
     fig = copy.deepcopy(fig)
+
     closed_panels = segment(fig, all_arrows)
+
+    structure_backbones = detect_structures(fig, label_and_get_ccs(fig))
+    structures = [panel for panel in closed_panels if
+                  any(panel.overlaps(backbone) and panel.area >= backbone.area for backbone in structure_backbones)]
+    # f, ax = plt.subplots()
+    # ax.imshow(fig.img)
+    # for panel in structures:
+    #     offset=0
+    #     rect_bbox = Rectangle((panel.left+offset, panel.top+offset),
+    #     panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
+    #     ax.add_patch(rect_bbox)
+    # plt.show()
+
+
+    # fig_structures = isolate_patches(fig, structures)
+    # plt.imshow(fig_structures.img)
+    # plt.title('structures isolated')
+    # plt.show()
     # f, ax = plt.subplots()
     # ax.imshow(fig.img)
     # for panel in closed_panels:
@@ -197,10 +223,10 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
     #     ax.add_patch(rect_bbox)
     # plt.show()
     for idx, arrow in enumerate(all_arrows):
-        ccs_reacts_prods = find_step_reactants_and_products(fig, all_conditions[idx], arrow, all_arrows, closed_panels)
+        ccs_reacts_prods = find_step_reactants_and_products(fig, all_conditions[idx], arrow, all_arrows, structures)
 
-        panels_dict = assign_to_nearest(closed_panels, ccs_reacts_prods['all_ccs_reacts'], ccs_reacts_prods['all_ccs_prods'])
-
+        panels_dict = assign_to_nearest(structures, ccs_reacts_prods['reactants'], ccs_reacts_prods['products'])
+        # panels_dict = ccs_reacts_prods
         first_step_flag = ccs_reacts_prods['first step']
         reacts = panels_dict['reactants']
         prods = panels_dict['products']
@@ -221,18 +247,19 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
     return steps
 
 
-def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrows, panels, stepsize=30):
+def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrows, structures, stepsize=30):
     """
     :param Figure fig: figure object being processed
     :param Conditions step_conditions: an object containing `text_lines` representing conditions connected components
     :param Arrow step_arrow: Arrow object connecting the reactants and products
     :param iterable all_arrows: a list of all arrows found
+    :param iterable structures: detected structures
     :return: a list of all conditions bounding boxes
     """
     log.info('Looking for reactants and products around arrow %s', step_arrow)
     first_step = False
     megabox_ccs = copy.deepcopy(step_conditions.text_lines)
-    megabox_ccs.add(step_arrow)
+    megabox_ccs.append(step_arrow)
     megabox = create_megabox(megabox_ccs)
     top_left = Point(row=megabox.top, col=megabox.left)
     bottom_left = Point(row=megabox.bottom, col=megabox.left)
@@ -274,21 +301,30 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
     p2_react = react_scanning_line.pixels[-1]
     p1_react_scancol = p1_react.col
     p2_react_scancol = p2_react.col
-    i=0 # for debugging only
+    i = 0 # for debugging only
+    all_point_pairs_react = []
     for step in range(fig.img.shape[1]//stepsize):
         p1_react_scancol += stepsize*react_increment
         p2_react_scancol += stepsize*react_increment
+        cond1 = p1_react_scancol < 0 or p2_react_scancol < 0
+        cond2 = p1_react_scancol > fig.img.shape[1] or p2_react_scancol > fig.img.shape[1]
+        if cond1 or cond2:
+            break
         line = approximate_line(Point(row=p1_react.row, col=p1_react_scancol),
                                 Point(row=p2_react.row, col=p2_react_scancol))
+        case_study_plot_pairs = [(p1_react_scancol, p1_react.row), (p2_react_scancol, p2_react.row)]
+        all_point_pairs_react.append(case_study_plot_pairs)
         if any(arrow.overlaps(line) for arrow in all_arrows):
             log.debug('While scanning reactants, an arrow was encountered - breaking from the loop')
 
             log.debug('breaking at iteration %s'% i)
             break
-        raw_reacts.update([panel for panel in panels if panel.overlaps(line)])
+        raw_reacts.update([structure for structure in structures if structure
+                          .overlaps(line)])
     else:
         first_step = True
     log.info('Found the following connected components of reactants: %s' % raw_reacts)
+
 
     # Find products
     raw_prods = set()
@@ -298,25 +334,49 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
     p2_prod_scancol = p2_prod.col
     #Need to access figure dimensions here
     i=0 # for debugging only
+    all_point_pairs_prod = []
     for step in range(fig.img.shape[1]//stepsize):
         p1_prod_scancol += stepsize*prod_increment
         p2_prod_scancol += stepsize*prod_increment
+        cond1 = p1_prod_scancol < 0 or p2_prod_scancol < 0
+        cond2 = p1_prod_scancol > fig.img.shape[1] or p2_prod_scancol > fig.img.shape[1]
+        if cond1 or cond2:
+            break
         line = approximate_line(Point(row=p1_prod.row, col=p1_prod_scancol),
                                 Point(row=p2_prod.row, col=p2_prod_scancol))
+        case_study_plot_pairs = [(p1_prod_scancol, p1_prod.row), (p2_prod_scancol, p2_prod.row)]
+        all_point_pairs_prod.append(case_study_plot_pairs)
+
         if any(arrow.overlaps(line) for arrow in all_arrows):
             log.debug('While scanning products, an arrow was encountered - breaking from the loop')
             log.debug('breaking prod at iteration  %s' % i)
             break
-        raw_prods.update([panel for panel in panels if panel.overlaps(line)])
+        raw_prods.update([structure for structure in structures if structure.overlaps(line)])
     log.info('Found the following connected components of prods: %s ' % raw_prods)
-    return {'all_ccs_reacts':raw_reacts, 'all_ccs_prods':raw_prods, 'first step': first_step}
 
 
-def assign_to_nearest(all_ccs, reactants, products, threshold=None):
+    f = plt.figure(figsize=(20,20))
+    ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
+    ax.imshow(fig.img, cmap=plt.cm.binary)
+    for line in all_point_pairs_react:
+        x, y = list(zip(*line))
+        ax.plot(x, y, 'r')
+
+    for line in all_point_pairs_prod:
+        x, y = list(zip(*line))
+        ax.plot(x, y, 'b')
+
+    plt.savefig('roles.tif')
+
+    plt.show()
+
+    return {'reactants':raw_reacts, 'products':raw_prods, 'first step': first_step}
+
+def assign_to_nearest(structures, reactants, products, threshold=None):
     """
-    This postrocessing function takes in all panels and classified panels to perform a set difference.
-    It then assings the remaining panels to the appropriate group based on the closest neighbour, subject to a threshold.
-    :param iterable all_ccs: list of all connected components excluding arrow
+    This postrocessing function takes in unassigned structures and classified panels to perform a set difference.
+    It then assings the structures to the appropriate group based on the closest neighbour, subject to a threshold.
+    :param iterable structures: list of all detected structured
     :param int threshold: maximum distance from nearest neighbour # Not used at this stage. Is it necessary?
     # :param iterable conditions: List of conditions' panels of a reaction step # not used
     :param iterable reactants: List of reactants' panels of a reaction step
@@ -326,14 +386,14 @@ def assign_to_nearest(all_ccs, reactants, products, threshold=None):
 
     log.debug('Assigning connected components based on distance')
     #print('assign: conditions set: ', conditions)
-    classified_ccs = set((*reactants, *products))
+    classified_structures = [*reactants, *products]
     #print('diagonal lengths: ')
     #print([cc.diagonal_length for cc in classified_ccs])
-    threshold =  0.5 * np.mean(([cc.diagonal_length for cc in classified_ccs]))
-    unclassified =  all_ccs.difference(classified_ccs)
+    threshold =  0.5 * np.mean(([cc.diagonal_length for cc in classified_structures]))
+    unclassified =  [structure for structure in structures if structure not in classified_structures]
     for cc in unclassified:
-        classified_ccs = sorted(classified_ccs, key=lambda elem: elem.separation(cc))
-        nearest = classified_ccs[0]
+        classified_structures.sort(key=lambda elem: elem.separation(cc))
+        nearest = classified_structures[0]
         groups = [reactants, products]
         for group in groups:
             if nearest in group and nearest.separation(cc) < threshold:
@@ -414,7 +474,6 @@ def remove_redundant_square_brackets(fig, ccs):
     return fig
 
 
-
 def match_function_and_smiles(reaction_step, smiles):
     """
     Matches the resolved smiles from chemschematicresolver to functions (reactant, product) found by the segmentation
@@ -427,7 +486,7 @@ def match_function_and_smiles(reaction_step, smiles):
     """
 
     for reactant in reaction_step.reactants:
-        matching_record = [recognised for recognised, diag in zip(*smiles) if diag == reactant.connected_components]
+        matching_record = [recognised for recognised, diag in zip(*smiles) if diag == reactant.connected_component]
         # This __eq__ is based on a flaw in csr - cc is of type `Label`, but inherits from Rect
         if matching_record:
             matching_record = matching_record[0]
@@ -438,8 +497,8 @@ def match_function_and_smiles(reaction_step, smiles):
 
     for product in reaction_step.products:
 
-        matching_record = [recognised for recognised, cc in zip(*smiles) if cc == product.connected_components]
-        # This __eq__ is based on flaw in csr - cc is of type `Label`, but inherits from Rect
+        matching_record = [recognised for recognised, diag in zip(*smiles) if diag == product.connected_component]
+        # This __eq__ is based on flaw in csr - cc is of type `Diagram`, but inherits from Rect
         if matching_record:
             matching_record = matching_record[0]
             product.label = matching_record[0]
@@ -456,51 +515,145 @@ def detect_structures(fig, ccs):
     :param [Panels[ ccs: list of all connected components
     :return [Panels]: list of connected components classified as structures
     """
-    # There are only two possible classes here: structures and text - arrows are excluded (for now?)
-    size = np.asarray([cc.area**2 for cc in ccs], dtype=float)
-    aspect_ratio = [cc.aspect_ratio for cc in ccs]
-    aspect_ratio = np.asarray([ratio + 1 / ratio for ratio in aspect_ratio],
-                              dtype=float)  # Transform to weigh wide
-    print('aspect ratio: \n', aspect_ratio)
-    plt.hist(aspect_ratio)
-    plt.show()
+    fig = copy.deepcopy(fig)
+    ccs = list(ccs)
+    # Get a rough bond length (line length) value from the two largest structures
+    ccs = sorted(ccs, key=lambda cc: cc.area, reverse=True)
+    estimation_fig = isolate_patches(fig, ccs[:2])
+    estimation_fig = skeletonize(estimation_fig)
+    num_lines = []
+    min_line_lengths = list(range(20, 60, 2))
+    for length in min_line_lengths:
+        lines = probabilistic_hough_line(estimation_fig.img, line_length=length, threshold=15)
+        plt.imshow(estimation_fig.img, cmap=plt.cm.binary)
+        # for line in lines:
+        #     p0, p1 = line
+        #     plt.plot((p0[0], p1[0]), (p0[1], p1[1]))
+        #
+        # plt.show()
+        num_lines.append(len(lines))
 
-    # and tall structures equally (as opposed to ratios around 1)
-    pixel_ratios = np.asarray([pixel_ratio(fig, cc) for cc in ccs])
-    data = np.vstack((size, aspect_ratio, pixel_ratios))
-    data = np.transpose(data)
-    print(np.mean(data, axis=0))
-    print(np.std(data, axis=0))
-    data -= np.mean(data, axis=0)
-    data /= np.std(data, axis=0)
-    data[:,2] = np.power(data[:, 2], 3)
-    # data[:, 2] = np.power(data[:, 2], 3)
-    f, ax = plt.subplots(2,2)
-    print(sorted(data[:,0]))
-    ax[0,0].scatter(data[:,0],data[:,1])
-    ax[0,1].scatter(data[:,1], data[:,2])
-    ax[1,0].scatter(data[:,0], data[:,2])
-    plt.show()
-    # print('size: \n', size)
+    # plt.plot(min_line_lengths, num_lines)
+    # plt.show()
+    # Filter results without any lines (when the min_length is high only, so order is preserved)
+    num_lines = [number for number in num_lines if number > 10]  # Assume minimum number of lines in total to aid algorithm
+    print(num_lines)
+    # Calculate the differential for number of lines as the minimum line length is varied
+    dnumber = [num_lines[idx] - num_lines[idx-1] for idx in range(1, len(num_lines))]
+    grouped = list(zip(min_line_lengths, num_lines, dnumber)) # zips min_line_lengths starting from beginning up to
+    # length of num_lines
+    grouped = [record for record in grouped if record[2] < 0] # Filter out if number of lines increases when length is increased to
+    # get rid of noise
 
-    # print('pixel ratio: \n', pixel_ratio)
+    # Choose the value where the number of lines starts to drop most rapidly and assign it as the boundary length
+    # TODO: Do I choose the value before or after the drop?
+    boundary_length, _, _ = sorted(grouped, key=lambda record: record[2])[0]
+    print(f'boundary length: {boundary_length}')
+
+    # Use the length to find number of lines in each cc - this will be one of the used features
+    cc_lines = []
+    # all_lines = [] #Case study only
+    for cc in ccs:
+        isolated_cc_fig = isolate_patches(fig, [cc])
+        isolated_cc_fig = skeletonize(isolated_cc_fig)
+        # lines = probabilistic_hough_line(isolated_cc_fig.img, line_length=boundary_length, threshold=15)  # Case study
+        # all_lines.extend(lines)  # case study
+        num_lines = len(probabilistic_hough_line(isolated_cc_fig.img, line_length=boundary_length, threshold=15))
+        cc_lines.append(num_lines)
+
+    ##Case study only
+    # skeleton_fig = skeletonize(fig)
+    # f = plt.figure(figsize=(20, 20))
+    # ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
+    # ax.imshow(fig.img, cmap=plt.cm.binary)
+    # for line in all_lines:
     #
-    print(f'data:')
-    # print(data)
-    # print(data.shape)
-    #labels = KMeans(n_clusters=2, n_init=20).fit_predict(data)
-    eps = np.sum(np.std(data, axis=0))
+    #     x, y = list(zip(*line))
+    #     ax.plot(x,y, 'r')
+    #
+    # plt.savefig('lines_structures.tif')
+    # plt.show()
+    ##Case study end
 
-    neigh = NearestNeighbors(n_neighbors=2)
-    nbrs = neigh.fit(data)
-    distances, indices = nbrs.kneighbors(data)
-    distances = np.sort(distances, axis=0)
-    distances = distances[:, 1]
-    print('distances: \n', distances)
-    _, bins, _ = plt.hist(distances)
-    plt.show()
-    eps = bins[1]
-    labels = DBSCAN(min_samples=5,eps=eps).fit_predict(data)
-    #labels = OPTICS().fit_predict(data)
-    print(labels)
-    return ccs, labels
+    cc_lines = np.array(cc_lines).reshape(-1,1)
+    area = np.array([cc.area for cc in ccs]).reshape(-1, 1)
+    mean_area = np.mean(area)
+
+    data = np.hstack((cc_lines, area))
+    data = standardize(data)
+    data = data.clip(min=0)
+    # data = cc_lines
+    # print(f'data: {data}')
+
+    labels = DBSCAN(eps=1).fit_predict(data)
+
+    colors = ['b', 'm', 'g', 'r']
+    paired = list(zip(ccs, labels))
+
+
+    # if True:
+    #     f = plt.figure(figsize=(20, 20))
+    #     ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
+    #     ax.imshow(fig.img, cmap=plt.cm.binary)
+    #     # ax.set_title('structure identification')
+    #     for panel, label in paired:
+    #         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor=colors[label])
+    #         ax.add_patch(rect_bbox)
+    #     plt.savefig('backbones.tif')
+    #      plt.show()
+    structures = [panel for panel, label in paired if label == -1]
+
+    return structures
+
+
+
+
+
+    # # There are only two possible classes here: structures and text - arrows are excluded (for now?)
+    # size = np.asarray([cc.area**2 for cc in ccs], dtype=float)
+    # aspect_ratio = [cc.aspect_ratio for cc in ccs]
+    # aspect_ratio = np.asarray([ratio + 1 / ratio for ratio in aspect_ratio],
+    #                           dtype=float)  # Transform to weigh wide
+    # print('aspect ratio: \n', aspect_ratio)
+    # plt.hist(aspect_ratio)
+    # plt.show()
+    #
+    # # and tall structures equally (as opposed to ratios around 1)
+    # pixel_ratios = np.asarray([pixel_ratio(fig, cc) for cc in ccs])
+    # data = np.vstack((size, aspect_ratio, pixel_ratios))
+    # data = np.transpose(data)
+    # print(np.mean(data, axis=0))
+    # print(np.std(data, axis=0))
+    # data -= np.mean(data, axis=0)
+    # data /= np.std(data, axis=0)
+    # data[:,2] = np.power(data[:, 2], 3)
+    # # data[:, 2] = np.power(data[:, 2], 3)
+    # f, ax = plt.subplots(2,2)
+    # print(sorted(data[:,0]))
+    # ax[0,0].scatter(data[:,0],data[:,1])
+    # ax[0,1].scatter(data[:,1], data[:,2])
+    # ax[1,0].scatter(data[:,0], data[:,2])
+    # plt.show()
+    # # print('size: \n', size)
+    #
+    # # print('pixel ratio: \n', pixel_ratio)
+    # #
+    # print(f'data:')
+    # # print(data)
+    # # print(data.shape)
+    # #labels = KMeans(n_clusters=2, n_init=20).fit_predict(data)
+    # eps = np.sum(np.std(data, axis=0))
+    #
+    # neigh = NearestNeighbors(n_neighbors=2)
+    # nbrs = neigh.fit(data)
+    # distances, indices = nbrs.kneighbors(data)
+    # distances = np.sort(distances, axis=0)
+    # distances = distances[:, 1]
+    # print('distances: \n', distances)
+    # _, bins, _ = plt.hist(distances)
+    # plt.show()
+    # eps = bins[1]
+    # labels = DBSCAN(min_samples=5,eps=eps).fit_predict(data)
+    # #labels = OPTICS().fit_predict(data)
+    # print(labels)
+    # return ccs, labels

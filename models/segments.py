@@ -252,6 +252,7 @@ class Panel(Rect):
     def pixel_ratio(self, pixel_ratio):
         self._pixel_ratio = pixel_ratio
 
+
 class Figure(object):
     """A figure image."""
 
@@ -301,11 +302,17 @@ class Figure(object):
 
 
 class TextLine(Panel):
-
+    """
+    TextLine objects represent lines of text in an image and contain all its connected components. They inherit from
+    `Panel` and have `left`, `right`, `top` and `bottom` attributes which are the extrema of attributes of individual
+    character connected components. These parameters are updated each time characters are added or removed from the
+    textline
+    """
     def __init__(self, left, right, top, bottom, connected_components=[]):
         self.text = None
         self._height = None
         self._width = None
+
         self._connected_components = connected_components
         # self.find_text() # will be used to find text from `connected_components`
         super(Panel, self).__init__(left, right, top, bottom)

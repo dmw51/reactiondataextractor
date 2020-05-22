@@ -10,10 +10,11 @@ from PIL import Image, ImageOps
 from models.segments import Figure
 from models.reaction import Reaction
 from utils.io import imread
-from utils.processing import erase_elements, preprocessing_remove_long_lines, binary_close, get_bounding_box, flatten_list, label_and_get_ccs, detect_headers, detect_rectangle_boxes
+from utils.processing import erase_elements, preprocessing_remove_long_lines, binary_close, get_bounding_box, flatten_list, label_and_get_ccs, detect_headers,\
+    detect_rectangle_boxes, isolate_patches
 from conditions import find_reaction_conditions, get_conditions
 from actions import (find_solid_arrows, segment, scan_all_reaction_steps, skeletonize_area_ratio,binary_tag,
-                     remove_redundant_characters, match_function_and_smiles, remove_redundant_square_brackets)
+                     remove_redundant_characters, match_function_and_smiles, remove_redundant_square_brackets, detect_structures)
 from skimage.morphology import binary_closing, disk
 
 import chemschematicresolver as csr
@@ -42,8 +43,11 @@ PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'Easy', 'high_res')
 # PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'Uncropped')
 # for file in os.listdir(PATH):
 filename = '10.1021_jacs.9b12546_1.jpg'
+
 p = os.path.join(PATH, filename)
 fig = imread(p)
+
+
 labelled = binary_tag(copy.deepcopy(fig))
 initial_ccs = get_bounding_box(labelled)
 global_skel_pixel_ratio = skeletonize_area_ratio(fig, fig.get_bounding_box())
@@ -86,12 +90,13 @@ fig_clean = remove_redundant_square_brackets(fig_clean, leftover_ccs)
 #print(f'headers: {headers}')
 #fig_clean = erase_elements(fig_clean, flatten_list(headers) + boxes)
 
+
 steps = scan_all_reaction_steps(fig_clean, arrows, all_conditions, initial_ccs, global_skel_pixel_ratio)
-fig, ax = plt. subplots()
+f, ax = plt. subplots()
 
 
 ax.imshow(fig_clean.img)
-plt.show()
+
 # for step in steps:
 #     offset = 0
 #     raw_reacts = step.reactants.connected_components
@@ -108,13 +113,13 @@ plt.show()
 #     for panel in raw_prods:
 #         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
 #         ax.add_patch(rect_bbox)
-# plt.show()
+plt.show()
 processed = Image.fromarray(fig_clean.img).convert('RGB')
 processed = ImageOps.invert(processed)
 
 processed.save(PATH+'/processed'+'.tif')
 
-csr_out, diags_ccs_ordered = csr.extract_image_rde(PATH+'/processed.tif', debug=True, allow_wildcards=True)
+csr_out, diags_ccs_ordered = csr.extract_image_rde(PATH+'/processed.tif', debug=True, allow_wildcards=False)
 print(f'csr out: {csr_out}')
 print(f'ordered diags: {diags_ccs_ordered}')
 
@@ -122,6 +127,7 @@ print(f'end here: {steps[0]}')
 print(steps[0].reactants[0])
 result = csr_out, diags_ccs_ordered
 for step in steps:
+    print(f'all attributes of step {step}: {vars(step)}')
     match_function_and_smiles(step, result)
     for product in step.products:
         print(f'step: {step}, product: {vars(product)}')
@@ -129,10 +135,54 @@ for step in steps:
         print(f'step: {step}, reactant: {vars(reactant)}')
 
 reaction = Reaction.from_reaction_steps(steps)
+print(f'reaction: {reaction.steps}')
+
+# f, ax = plt.subplots(figsize=(10, 6))
+# ax.imshow(fig.img, cmap=plt.cm.binary)
 
 
-
-
+# for panel in arrows:
+#     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',
+#                           edgecolor='g')
+#     ax.add_patch(rect_bbox)
+#
+# offset = 0
+# print(f'all steps: {steps}')
+# for step in steps:
+#     conditions_text = step.conditions.text_lines
+#     reactants = step.reactants
+#     products = step.products
+#
+#     conditions_anchor = conditions_text[0]
+#     ax.text(conditions_anchor.left-conditions_anchor.width//4, conditions_anchor.top - 2*conditions_anchor.height,
+#             str(step.conditions), color='b', size=8)
+#     for panel in conditions_text:
+#         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',
+#                               edgecolor='y')
+#         ax.add_patch(rect_bbox)
+#
+#     for reactant in reactants:
+#         panel = reactant.connected_component
+#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top,
+#                               facecolor='none', edgecolor='m')
+#         ax.add_patch(rect_bbox)
+#         ax.text(panel.left, panel.top - panel.height//20, '%s \nlabel = %s' % (reactant.smiles, reactant.label,),
+#                 size=8)
+#
+#     for product in products:
+#         panel = product.connected_component
+#         print(f'product panel: {panel}')
+#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top,
+#                               facecolor='none', edgecolor='r')
+#         ax.text(panel.left, panel.top - panel.height//20, '%s \nlabel = %s' % (product.smiles, product.label),
+#                 size=8)
+#         ax.add_patch(rect_bbox)
+#
+#     offset += 5
+#
+# ax.set_axis_off()
+# plt.savefig('out_consecutive_ABC.tif')
+# plt.show()
 
 
 

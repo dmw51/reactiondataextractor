@@ -84,6 +84,8 @@ class SolidArrow(BaseArrow):
         except NotAnArrowException:
             raise
 
+    def __repr__(self):
+        return f'SolidArrow(pixels={self.pixels}, line={self.line}, bottom={self.bottom})'
 
     def get_direction(self):
         self.react_side = [pixel for pixel in self.pixels if sum(pixel) <= sum(self.center_px)]

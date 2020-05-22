@@ -373,7 +373,7 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, white
         img.shape, x_offset, y_offset, padding, whitelist
     )
     # Rescale image - make it larger
-    img = rescale(img, 2.0, order=1, anti_aliasing=True, multichannel=False)
+    img = rescale(img, 2.0, order=1, mode='reflect', anti_aliasing=True, multichannel=False)
 
     # Add a buffer around the entire input image to ensure no text is too close to edges
     img_padding = 10
