@@ -39,150 +39,177 @@ ch.setFormatter(formatter)
 logger.addHandler(ch)
 
 MAIN_DIR = os.getcwd()
-PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'Easy', 'high_res')
+PATH = os.path.join(MAIN_DIR, 'images', 'Dummies')
 # PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'Uncropped')
-# for file in os.listdir(PATH):
-filename = '10.1021_jacs.9b12546_1.jpg'
+PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'case_studies_1st_year')
+# filename = 'jo0c00218_0003.jpeg'
+for filename in os.listdir(PATH):
 
-p = os.path.join(PATH, filename)
-fig = imread(p)
+    p = os.path.join(PATH, filename)
+    fig = imread(p)
 
 
-labelled = binary_tag(copy.deepcopy(fig))
-initial_ccs = get_bounding_box(labelled)
-global_skel_pixel_ratio = skeletonize_area_ratio(fig, fig.get_bounding_box())
-arrows = find_solid_arrows(fig, thresholds=None, min_arrow_lengths=None)
+    labelled = binary_tag(copy.deepcopy(fig))
+    initial_ccs = get_bounding_box(labelled)
+    global_skel_pixel_ratio = skeletonize_area_ratio(fig, fig.get_bounding_box())
+    arrows = find_solid_arrows(fig, thresholds=None, min_arrow_lengths=None)
+    # arrow = arrows[0]
+    # prod = arrow.prod_side
+    # react = arrow.react_side
+    structures = detect_structures(fig, initial_ccs)
+    print(f'structures: {structures}')
+    print(arrows)
+    print(f'number of arrows: {len(arrows)}')
+    plt.imshow(fig.img, cmap=plt.cm.binary)
+    for arrow in arrows:
+        y, x = list(zip(*arrow.pixels))
+        plt.scatter(x, y)
+    plt.title('detected arrows')
+    plt.show()
 
-# ### TEMP
-# fig_no_arrows = erase_elements(fig, arrows)
-# # fig_no_arrows_closed = Figure(binary_closing(fig_no_arrows.img,selem=disk(2)))
-# temp_ccs = label_and_get_ccs(fig_no_arrows)
-# ccs, labels = detect_structures(fig_no_arrows, temp_ccs)
-# f, ax = plt.subplots()
-# colours = ['b', 'm', 'y','r']
-# ax.imshow(fig_no_arrows.img, cmap='binary')
-# for idx, panel in enumerate(temp_ccs):
-#     #
-#     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none', edgecolor=colours[labels[idx]])
-#     ax.add_patch(rect_bbox)
+    plt.imshow(fig.img, cmap=plt.cm.binary)
+    for arrow in arrows:
+
+        y, x = list(zip(*arrow.react_side))
+        plt.scatter(x, y, c='r', s=.1)
+        y, x = list(zip(*arrow.prod_side))
+        plt.scatter(x, y, c='b', s=.1)
+    plt.title('detected sides')
+    plt.show()
+    # ### TEMP
+    # fig_no_arrows = erase_elements(fig, arrows)
+    # # fig_no_arrows_closed = Figure(binary_closing(fig_no_arrows.img,selem=disk(2)))
+    # temp_ccs = label_and_get_ccs(fig_no_arrows)
+    # ccs, labels = detect_structures(fig_no_arrows, temp_ccs)
+    # f, ax = plt.subplots()
+    # colours = ['b', 'm', 'y','r']
+    # ax.imshow(fig_no_arrows.img, cmap='binary')
+    # for idx, panel in enumerate(temp_ccs):
+    #     #
+    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none', edgecolor=colours[labels[idx]])
+    #     ax.add_patch(rect_bbox)
+    #
+    # plt.show()
+    # ###
+
+    # all_conditions_bboxes = []
+    # all_conditions = []
+    # for arrow in arrows:
+    #     conditions_bboxes = find_reaction_conditions(fig, arrow, initial_ccs)
+    #     conditions = get_conditions(fig, arrow, initial_ccs)
+    #     pprint(conditions)
+    #     all_conditions_bboxes.append(conditions_bboxes)
+    #     all_conditions.append(conditions)
+    #
+    # cond_flat = [textline for conditions in all_conditions_bboxes for textline in conditions]
+    # fig_no_cond = erase_elements(fig, [*cond_flat,*arrows])
+    #
+    # leftover_ccs = label_and_get_ccs(fig_no_cond)
+    # fig_clean = remove_redundant_characters(fig_no_cond, leftover_ccs)
+    # fig_clean = remove_redundant_square_brackets(fig_clean, leftover_ccs)
+    # #headers = detect_headers(binary_close(fig_clean, 5))
+    # #boxes = detect_rectangle_boxes(fig_clean, greedy=True)
+    # #print(f'boxes: {boxes}')
+    # #print(f'headers: {headers}')
+    # #fig_clean = erase_elements(fig_clean, flatten_list(headers) + boxes)
+    #
+    #
+    # steps = scan_all_reaction_steps(fig_clean, arrows, all_conditions, initial_ccs, global_skel_pixel_ratio)
+    # f, ax = plt. subplots()
+    # #
+    # #
+    # ax.imshow(fig_clean.img)
+    #
+    # # for step in steps:
+    # #     offset = 0
+    # #     raw_reacts = step.reactants.connected_components
+    # #     raw_prods = step.products.connected_components
+    # #
+    # #     # for panel in conditions:
+    # #     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
+    # #     #     ax.add_patch(rect_bbox)
+    # #
+    # #     for panel in raw_reacts:
+    # #         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
+    # #         ax.add_patch(rect_bbox)
+    # #
+    # #     for panel in raw_prods:
+    # #         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
+    # #         ax.add_patch(rect_bbox)
+    # plt.show()
+    # processed = Image.fromarray(fig_clean.img).convert('RGB')
+    # processed = ImageOps.invert(processed)
+    #
+    # segmented_filepath = PATH+'/processed'+'.tif'
+    # processed.save(segmented_filepath)
+    #
+    # csr_out, diags_ccs_ordered = csr.extract_image_rde(PATH+'/processed.tif', debug=True, allow_wildcards=False)
+    # print(f'csr out: {csr_out}')
+    # print(f'ordered diags: {diags_ccs_ordered}')
+    #
+    # print(f'end here: {steps[0]}')
+    # print(steps[0].reactants[0])
+    # result = csr_out, diags_ccs_ordered
+    # os.remove(segmented_filepath)
+    # for step in steps:
+    #     print(f'all attributes of step {step}: {vars(step)}')
+    #     match_function_and_smiles(step, result)
+    #     for product in step.products:
+    #         print(f'step: {step}, product: {vars(product)}')
+    #     for reactant in step.reactants:
+    #         print(f'step: {step}, reactant: {vars(reactant)}')
+
+
 #
-# plt.show()
-# ###
-
-all_conditions_bboxes = []
-all_conditions = []
-for arrow in arrows:
-    conditions_bboxes = find_reaction_conditions(fig, arrow, initial_ccs)
-    conditions = get_conditions(fig, arrow, initial_ccs)
-    pprint(conditions)
-    all_conditions_bboxes.append(conditions_bboxes)
-    all_conditions.append(conditions)
-
-cond_flat = [textline for conditions in all_conditions_bboxes for textline in conditions]
-fig_no_cond = erase_elements(fig, [*cond_flat,*arrows])
-
-leftover_ccs = label_and_get_ccs(fig_no_cond)
-fig_clean = remove_redundant_characters(fig_no_cond, leftover_ccs)
-fig_clean = remove_redundant_square_brackets(fig_clean, leftover_ccs)
-#headers = detect_headers(binary_close(fig_clean, 5))
-#boxes = detect_rectangle_boxes(fig_clean, greedy=True)
-#print(f'boxes: {boxes}')
-#print(f'headers: {headers}')
-#fig_clean = erase_elements(fig_clean, flatten_list(headers) + boxes)
-
-
-steps = scan_all_reaction_steps(fig_clean, arrows, all_conditions, initial_ccs, global_skel_pixel_ratio)
-f, ax = plt. subplots()
-
-
-ax.imshow(fig_clean.img)
-
-# for step in steps:
-#     offset = 0
-#     raw_reacts = step.reactants.connected_components
-#     raw_prods = step.products.connected_components
+# reaction = Reaction.from_reaction_steps(steps)
+# print(f'reaction: {reaction.steps}')
 #
-#     # for panel in conditions:
-#     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='y')
-#     #     ax.add_patch(rect_bbox)
+# # f, ax = plt.subplots(figsize=(10, 6))
+# # ax.imshow(fig.img, cmap=plt.cm.binary)
 #
-#     for panel in raw_reacts:
-#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
-#         ax.add_patch(rect_bbox)
 #
-#     for panel in raw_prods:
-#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
-#         ax.add_patch(rect_bbox)
-plt.show()
-processed = Image.fromarray(fig_clean.img).convert('RGB')
-processed = ImageOps.invert(processed)
-
-processed.save(PATH+'/processed'+'.tif')
-
-csr_out, diags_ccs_ordered = csr.extract_image_rde(PATH+'/processed.tif', debug=True, allow_wildcards=False)
-print(f'csr out: {csr_out}')
-print(f'ordered diags: {diags_ccs_ordered}')
-
-print(f'end here: {steps[0]}')
-print(steps[0].reactants[0])
-result = csr_out, diags_ccs_ordered
-for step in steps:
-    print(f'all attributes of step {step}: {vars(step)}')
-    match_function_and_smiles(step, result)
-    for product in step.products:
-        print(f'step: {step}, product: {vars(product)}')
-    for reactant in step.reactants:
-        print(f'step: {step}, reactant: {vars(reactant)}')
-
-reaction = Reaction.from_reaction_steps(steps)
-print(f'reaction: {reaction.steps}')
-
-# f, ax = plt.subplots(figsize=(10, 6))
-# ax.imshow(fig.img, cmap=plt.cm.binary)
-
-
-# for panel in arrows:
-#     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',
-#                           edgecolor='g')
-#     ax.add_patch(rect_bbox)
-#
-# offset = 0
-# print(f'all steps: {steps}')
-# for step in steps:
-#     conditions_text = step.conditions.text_lines
-#     reactants = step.reactants
-#     products = step.products
-#
-#     conditions_anchor = conditions_text[0]
-#     ax.text(conditions_anchor.left-conditions_anchor.width//4, conditions_anchor.top - 2*conditions_anchor.height,
-#             str(step.conditions), color='b', size=8)
-#     for panel in conditions_text:
-#         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',
-#                               edgecolor='y')
-#         ax.add_patch(rect_bbox)
-#
-#     for reactant in reactants:
-#         panel = reactant.connected_component
-#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top,
-#                               facecolor='none', edgecolor='m')
-#         ax.add_patch(rect_bbox)
-#         ax.text(panel.left, panel.top - panel.height//20, '%s \nlabel = %s' % (reactant.smiles, reactant.label,),
-#                 size=8)
-#
-#     for product in products:
-#         panel = product.connected_component
-#         print(f'product panel: {panel}')
-#         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top,
-#                               facecolor='none', edgecolor='r')
-#         ax.text(panel.left, panel.top - panel.height//20, '%s \nlabel = %s' % (product.smiles, product.label),
-#                 size=8)
-#         ax.add_patch(rect_bbox)
-#
-#     offset += 5
-#
-# ax.set_axis_off()
-# plt.savefig('out_consecutive_ABC.tif')
-# plt.show()
+# # for panel in arrows:
+# #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',
+# #                           edgecolor='g')
+# #     ax.add_patch(rect_bbox)
+# #
+# # offset = 0
+# # print(f'all steps: {steps}')
+# # for step in steps:
+# #     conditions_text = step.conditions.text_lines
+# #     reactants = step.reactants
+# #     products = step.products
+# #
+# #     conditions_anchor = conditions_text[0]
+# #     ax.text(conditions_anchor.left-conditions_anchor.width//4, conditions_anchor.top - 2*conditions_anchor.height,
+# #             str(step.conditions), color='b', size=8)
+# #     for panel in conditions_text:
+# #         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',
+# #                               edgecolor='y')
+# #         ax.add_patch(rect_bbox)
+# #
+# #     for reactant in reactants:
+# #         panel = reactant.connected_component
+# #         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top,
+# #                               facecolor='none', edgecolor='m')
+# #         ax.add_patch(rect_bbox)
+# #         ax.text(panel.left, panel.top - panel.height//20, '%s \nlabel = %s' % (reactant.smiles, reactant.label,),
+# #                 size=8)
+# #
+# #     for product in products:
+# #         panel = product.connected_component
+# #         print(f'product panel: {panel}')
+# #         rect_bbox = Rectangle((panel.left+offset, panel.top+offset), panel.right-panel.left, panel.bottom-panel.top,
+# #                               facecolor='none', edgecolor='r')
+# #         ax.text(panel.left, panel.top - panel.height//20, '%s \nlabel = %s' % (product.smiles, product.label),
+# #                 size=8)
+# #         ax.add_patch(rect_bbox)
+# #
+# #     offset += 5
+# #
+# # ax.set_axis_off()
+# # plt.savefig('out_consecutive_ABC.tif')
+# # plt.show()
 
 
 

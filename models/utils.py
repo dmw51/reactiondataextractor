@@ -16,8 +16,6 @@ class Point:
         self.row = int(row)
         self.col = int(col)
 
-    def __iter__(self):
-        return iter((self.row, self.col))
 
     def __repr__(self):
         return f'{self.__class__.__name__}{self.row, self.col}'

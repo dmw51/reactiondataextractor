@@ -194,7 +194,7 @@ class ConditionParser:
         t_units = r'\s?(?:o|O|0|°)C|K'   # match 0C, oC and similar, as well as K
 
         t_value1 = r'\d{1,4}' + r'\s?(?=' + t_units + ')'  # capture numbers only if followed by units
-        t_value2 = r'rt'
+        t_value2 = r'r\.?\s?t\.?'
         t_value3 = r'heat'
 
         # Add greek delta?

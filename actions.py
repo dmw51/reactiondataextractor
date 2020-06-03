@@ -22,11 +22,11 @@ from models.segments import Rect, Panel, Figure, TextLine
 from models.utils import Point, Line
 from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill, pad
 from utils.processing import (binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, \
-                              belongs_to_textline, is_boundary_cc, label_and_get_ccs, isolate_patches, standardize)
+                              is_slope_consistent, label_and_get_ccs, isolate_patches, standardize, get_line_parameters)
 from ocr import read_character
 
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+log.setLevel('DEBUG')
 
 formatter = logging.Formatter('%(levelname)s:%(name)s: %(message)s')
 file_handler = logging.FileHandler('actions.log')
@@ -120,24 +120,24 @@ def skeletonize_area_ratio(fig, panel):
 
 def find_solid_arrows(fig, thresholds=None,min_arrow_lengths=None):
     if min_arrow_lengths is None:
-        min_arrow_length = int((fig.img.shape[0]+fig.img.shape[1])*0.05)
-        min_arrow_lengths = [min_arrow_length, int(min_arrow_length/1.5)]
+        min_arrow_length = int(np.sqrt(fig.img.shape[0]**2+fig.img.shape[1]**2)*0.01)
+        # min_arrow_lengths = [min_arrow_length, int(min_arrow_length/1.5)]
 
     if thresholds is None:
-        threshold = int((fig.img.shape[0]+fig.img.shape[1])*0.1)
-        thresholds = [threshold, int(threshold/1.5)]
+        threshold = int(np.sqrt(fig.img.shape[0]**2+fig.img.shape[1]**2)*0.025)
+        # thresholds = [threshold, int(threshold/1.5)]
     # print('thresh :', thresholds)
     # print('min length :', min_arrow_lengths)
 
     # Find arrows in a two-step search
-    arrows = find_solid_arrows_main_routine(fig,threshold=thresholds[0],min_arrow_length=min_arrow_lengths[0])
+    arrows = find_solid_arrows_main_routine(fig,threshold=threshold,min_arrow_length=min_arrow_length)
 
-    if not arrows:
-        log.info('No arrows have been found the image on the first attempt.')
-        arrows = find_solid_arrows_main_routine(fig, threshold=thresholds[1], min_arrow_length=min_arrow_lengths[1])
-        if not arrows:
-            log.warning('No arrows have been found in the image')
-
+    # if not arrows:
+    #     log.info('No arrows have been found the image on the first attempt.')
+    #     arrows = find_solid_arrows_main_routine(fig, threshold=thresholds[1], min_arrow_length=min_arrow_lengths[1])
+    #     if not arrows:
+    #         log.warning('No arrows have been found in the image')
+    #
     return arrows
 
 
@@ -150,7 +150,16 @@ def find_solid_arrows_main_routine(fig, threshold=None, min_arrow_length=None):
     """
     img = copy.deepcopy(fig.img)
     skeleton = skeletonize(fig).img
-    lines = probabilistic_hough_line(skeleton, threshold=threshold, line_length=min_arrow_length)
+    ccs = label_and_get_ccs(fig)
+    lines = []
+    for cc in ccs:
+        isolated_fig = isolate_patches(fig, [cc])
+        cc_lines = probabilistic_hough_line(isolated_fig.img, threshold=threshold, line_length=min_arrow_length)
+        if len(cc_lines) > 1:
+            if not is_slope_consistent(cc_lines):
+                continue
+            lines.append(cc_lines[0])
+    # lines = probabilistic_hough_line(skeleton, threshold=threshold, line_length=min_arrow_length)
     #print(lines)
     labelled_img, _ = label(img)
     arrows =[]
@@ -161,23 +170,41 @@ def find_solid_arrows_main_routine(fig, threshold=None, min_arrow_length=None):
     # plt.plot(line2[0], line2[1])
     # plt.axis('off')
     # plt.show()
+    plt.imshow(fig.img, cmap=plt.cm.binary)
+    for line in lines:
+        x, y = list(zip(*line))
+        plt.plot(x,y)
+    plt.title('detected lines')
+    plt.show()
+
     for l in lines:
         points = [Point(row=y, col=x) for x, y in l]
         # Choose one of points to find the label and pixels in the image
         p1 = points[0]
+        p2 = points[1]
+        # p1_label = labelled_img[p1.row, p1.col]
+        # p2_label = labelled_img[p2.row, p2.col]
+        # if p1_label != p2_label: # Hough transform can find lines spanning several close ccs; these are discarded
+        #     log.info('A false positive was found when detecting a line. Discarding...')
+        #     continue
         #print('checking p1:...')
         #print(p1.row, p1. col)
         #print('should be (96, 226)')
         arrow_label = labelled_img[p1.row, p1.col]
+
         arrow_pixels = np.nonzero(labelled_img == arrow_label)
         arrow_pixels = list(zip(*arrow_pixels))
         try:
-            arrows.append(SolidArrow(arrow_pixels, line=approximate_line(*points)))
-        except NotAnArrowException:
-            log.info('An arrow candidate was discarded ')
+            new_arrow = SolidArrow(arrow_pixels, line=approximate_line(*points))
+        except NotAnArrowException as e:
+            log.info('An arrow candidate was discarded - ' + str(e))
+        else:
+            arrows.append(new_arrow)
     # Filter poor arrow assignments based on aspect ratio
-    arrows = [arrow for arrow in arrows if arrow.aspect_ratio >5]
-    return arrows
+    # arrows = [arrow for arrow in arrows if arrow.aspect_ratio >5]  ## This is not valid for tilted arrows
+    return list(set(arrows))
+
+
 
 
 
@@ -230,7 +257,7 @@ def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_
         first_step_flag = ccs_reacts_prods['first step']
         reacts = panels_dict['reactants']
         prods = panels_dict['products']
-        print(f'panels_dict: {panels_dict}')
+        # print(f'panels_dict: {panels_dict}')
         # if global_skel_pixel_ratio > 0.02 : #Original kernel size < 6
         #     reacts = postprocessing_close_merge(fig, reacts)
         #     prods = postprocessing_close_merge(fig, prods)
@@ -254,7 +281,7 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
     :param Arrow step_arrow: Arrow object connecting the reactants and products
     :param iterable all_arrows: a list of all arrows found
     :param iterable structures: detected structures
-    :return: a list of all conditions bounding boxes
+    :return: a list of all conditions bounding boxes ##
     """
     log.info('Looking for reactants and products around arrow %s', step_arrow)
     first_step = False
@@ -371,6 +398,21 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
     plt.show()
 
     return {'reactants':raw_reacts, 'products':raw_prods, 'first step': first_step}
+
+
+# def find_step_reactants_and_products(fig, step_arrow, all_arrows, structures):
+#     """
+#     Finds reactants and products from ``structures`` of a single reaction step (around a single arrow) using
+#     scanning in ``fig.img``. Scanning is terminated early if any of ``all_arrows`` is encountered
+#     :param Figure fig: figure object being processed
+#     :param Arrow step_arrow: Arrow object connecting the reactants and products
+#     :param iterable all_arrows: a list of all arrows found
+#     :param iterable structures: detected structures
+#     :return: a dictionary with ``reactants``, ``products`` and ``first step`` flag
+#     """
+#     slope, intercept = get_line_parameters(step_arrow.line)
+
+
 
 def assign_to_nearest(structures, reactants, products, threshold=None):
     """
@@ -657,3 +699,40 @@ def detect_structures(fig, ccs):
     # #labels = OPTICS().fit_predict(data)
     # print(labels)
     # return ccs, labels
+
+
+
+
+
+def extend_line(line, extension):
+    """
+    Adds more points to the ``line`` in more directions, the extension length is dictated by ``extension``
+    :param Line line: original Line object
+    :param int extension: value dictated how far the new line should extend in each direction
+    :return: new Line object
+    """
+    slope, intercept = get_line_parameters(line)
+    if slope is np.inf:  # vertical line
+        line.pixels.sort(key=lambda point: point.row)
+
+    else:
+        line.pixels.sort(key=lambda point: point.col)
+
+    first_line_pixel = line.pixels[0]
+    last_line_pixel = line.pixels[-1]
+
+    left_extended_last_y = slope*(first_line_pixel-extension) + intercept
+    right_extended_last_y = slope*(last_line_pixel+extension) + intercept
+
+    left_extended_point = Point(row=left_extended_last_y, col=first_line_pixel.col-extension)
+    right_extended_point = Point(row=right_extended_last_y, col=last_line_pixel+extension)
+
+    extended = approximate_line(first_line_pixel, left_extended_point) +\
+               approximate_line(last_line_pixel, right_extended_point) + line
+
+
+    new_line = Line(extended)
+
+    return new_line
+
+

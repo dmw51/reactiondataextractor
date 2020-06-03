@@ -186,43 +186,182 @@ def dilate_fragments(fig, skel_pixel_ratio):
     return fig
 
 
-def approximate_line(p1, p2):
+def get_line_parameters(line):
     """
-    This is a prototype and will not work for vertical lines.
-    This algorithm operates in Cartesian space
+    Calculates slope and intercept of ``line``
+    :param Line or ((x1,y1), (x2,y2)) : one of the two representations of a straight line
+    :return: (slope, intercept)
     """
-    #TODO: But both output and input are in the image space -
-    # so reimplement this to match
-    #print('checking inside approx line p1:')
-    #print(p1.row, p1.col)
-    x1, y1 = p1.col, p1.row
-    x2, y2 = p2.col, p2.row
-    deltax = x2 - x1
-    deltay = y2 - y1
-    domain = range(x1, x2 + 1) if x2 > x1 else range(x2, x1 + 1)
+    if isinstance(line, Line):
+        point_1 = line.pixels[0]
+        x1, y1 = point_1.col, point_1.row
 
-    try:
-        deltaerr = abs(deltay / deltax)
-    except ZeroDivisionError:
-        y_range = range(y1, y2+1) if y2 > y1 else range(y2, y1+1)
-        pixels = [Point(row=y_value, col=x1) for y_value in y_range]
+        point_2 = line.pixels[-1]  # Can be any two points, but non-neighbouring points increase accuracy of calculation
+        x2, y2 = point_2.col, point_2.row
+
     else:
-        error = 0
-        y = y1
-        line = []
-        for x in domain:
-            line.append((x, y))
-            error += deltaerr
-            if error >= 0.5:
-                deltay_sign = int(math.copysign(1, deltay))
-                y += deltay_sign
-                error -= 1
-        pixels = [Point(row=y, col=x) for x, y in line]
-        #print('checking inside approx line before return  p1:')
-        #print(pixels[0].row, pixels[0].col)
-    #print(pixels[0].row, pixels[0].col)
+        if not all(isinstance(point, Point) for point in line):
+            line = [Point(y,x) for x,y in line]
+        assert len(line) == 2, "Line has to be expressed as a tuple of two Points if not a Line object"
+
+        # Either Line or a raw Hough Transform output (two endpoints)
+
+        point_1 = line[0]
+        x1, y1 = point_1.col, point_1.row
+
+        point_2 = line[1]
+        x2, y2 = point_2.col, point_2.row
+
+    delta_x = x2 - x1
+    delta_y = y2 - y1
+
+    if delta_x == 0:
+        slope = np.inf
+    else:
+        slope = delta_y/delta_x
+
+    intercept_1 = y1 - slope*x1
+    intercept_2 = y2 - slope*x2
+    intercept = (intercept_1 + intercept_2)/2
+
+    return slope, intercept
+
+def is_slope_consistent(lines):
+    """
+    Checks if the slope of multiple lines is the same or similar. Useful when multiple lines found when searching for
+    arrows
+    :param [((x1,y1), (x2,y2))] lines: iterable of pairs of coordinates
+    :return: True if slope is similar amongst the lines, False otherwise
+    """
+
+    slopes = []
+    for line in lines:
+        slope, _ = get_line_parameters(line)
+
+        slopes.append(slope)
+
+    if all([slope == np.inf or slope == -np.inf for slope in slopes]):
+        return True
+    if any([slope == np.inf or slope == -np.inf for slope in slopes]):
+        slopes = [slope for slope in slopes if abs(slope) != np.inf]
+    avg_slope = np.mean(slopes)
+    std_slope = np.std(slopes)
+    abs_tol = 0.15
+    rel_tol = 0.15
+    tol = abs_tol if abs(avg_slope < 1) else rel_tol * avg_slope
+    print(f'avg slope: {avg_slope}, std_slope: {std_slope}')
+    if std_slope > abs(tol):
+        return False
+
+    return True
+
+# def is_intercept_consistent(lines):
+#     """
+#     Checks if the intercept of multiple lines is the same or similar. Useful when multiple lines found when searching for
+#     arrows
+#     :param [((x1,y1), (x2,y2))] lines: iterable of pairs of coordinates
+#     :return: True if intercept is similar amongst the lines, False otherwise
+#     """
+#
+#     intercepts = []
+#     for line in lines:
+#         _, intercept = get_line_parameters(line)
+#
+#         intercepts.append(intercept)
+#     if all([intercept == np.inf or intercept == -np.inf for intercept in intercepts ]):
+#         return True
+#     else:
+#         intercepts = [intercept for intercept in intercepts if abs(intercept) != np.inf]
+#
+#     avg_intercept = np.mean(intercepts)
+#     std_intercept = np.std(intercepts)
+#     abs_tol = 3000
+#     rel_tol = 0.05
+#     tol = abs_tol if abs(avg_intercept < 10000) else rel_tol * avg_intercept
+#     print(f'avg intercept: {avg_intercept}, std_intercept: {std_intercept}')
+#     if std_intercept > abs(tol):
+#         return False
+#
+#     return True
+
+def approximate_line(point_1, point_2):
+    """
+    Implementation of a Bresenham's algorithm. Approximates a straight line between ``point_1`` and ``point_2`` with
+    pixels. Output is a list representing pixels forming a straight line path from ``point_1`` to ``point_2``
+    """
+
+    slope, _ = get_line_parameters((point_1, point_2))
+
+    if not isinstance(point_1, Point) and not isinstance(point_2, Point):
+        point_1 = Point(row=point_1[1], col=point_1[0])
+        point_2 = Point(row=point_2[1], col=point_2[0])
+
+    if slope is np.inf:
+        ordered_points = sorted([point_1, point_2], key=lambda point: point.row)
+        return Line([Point(row=row, col=point_1.col) for row in range(ordered_points[0].row, ordered_points[1].row)])
+
+    elif abs(slope) >= 1:
+        ordered_points = sorted([point_1, point_2], key=lambda point: point.row)
+        return bresenham_line_y_dominant(*ordered_points, slope)
+
+    elif abs(slope) < 1:
+        ordered_points = sorted([point_1, point_2], key=lambda point: point.col)
+        return bresenham_line_x_dominant(*ordered_points, slope)
+
+
+def bresenham_line_x_dominant(point_1, point_2, slope):
+    """
+    bresenham algorithm implementation when change in x is larger than change in y
+    :param point_1:
+    :param point_2:
+    :return:
+    """
+    y1 = point_1.row
+    y2 = point_2.row
+    deltay = y2 - y1
+    domain = range(point_1.col, point_2.col+1)
+
+    deltaerr = abs(slope)
+    error = 0
+    y = point_1.row
+    line = []
+    for x in domain:
+        line.append((x, y))
+        error += deltaerr
+        if error >= 0.5:
+            deltay_sign = int(math.copysign(1, deltay))
+            y += deltay_sign
+            error -= 1
+    pixels = [Point(row=y, col=x) for x, y in line]
+
     return Line(pixels=pixels)
 
+def bresenham_line_y_dominant(point_1, point_2, slope):
+    """
+    :param point_1:
+    :param point_2:
+    :return:
+    """
+
+    x1 = point_1.col
+    x2 = point_2.col
+    deltax = x2-x1
+    domain = range(point_1.row, point_2.row + 1)
+
+    deltaerr = abs(1/slope)
+    error = 0
+    x = point_1.col
+    line = []
+    for y in domain:
+        line.append((x, y))
+        error += deltaerr
+        if error >= 0.5:
+            deltax_sign = int(math.copysign(1, deltax))
+            x += deltax_sign
+            error -= 1
+    pixels = [Point(row=y, col=x) for x, y in line]
+
+    return Line(pixels=pixels)
 
 def create_megabox(boxes):
     """

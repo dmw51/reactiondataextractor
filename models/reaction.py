@@ -93,13 +93,18 @@ class ReactionStep(BaseReactionClass):
         self.conditions.text_lines.sort(key=lambda textline: textline.top)
         self._first = first   #  internal flag to indicate first step in a reaction
 
+    def __eq__(self, other):
+        return (self.arrow == other.arrow and self.reactants == other.reactants and self.products == other.products and
+                self.conditions == other.conditions)
+
+    def __hash__(self):
+        return hash(self.arrow) + hash(self.conditions)
+
     @property
     def first(self):
         return self._first
 
-    def __eq__(self, other):
-        return (self.arrow == other.arrow and self.reactants == other.reactants and self.products == other.products and
-                self.conditions == other.conditions)
+
 
 
 class Conditions:
@@ -116,6 +121,12 @@ class Conditions:
 
     def __str__(self):
         return "\n".join(f'{key} : {value}' for key, value in self.conditions_dct.items() if value)
+
+    def __eq__(self, other):
+        return self.text_lines == other.text_lines and self.conditions_dct == other.conditions_dct
+
+    def __hash__(self):
+        return hash(len(self.text_lines)) + hash(self.conditions_dct.values())
     @property
     def co_reactants(self):
         return self.conditions_dct['co-reactants']
@@ -144,8 +155,7 @@ class Conditions:
     def yield_(self):
         return self.conditions_dct['yield']
 
-    def __eq__(self, other):
-        return self.text_lines == other.text_lines and self.conditions_dct == other.conditions_dct
+
 
 
 class Reactant(ChemicalStructure):
