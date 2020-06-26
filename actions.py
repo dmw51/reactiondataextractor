@@ -1,4 +1,5 @@
 from collections import namedtuple, Counter
+from functools import partial
 import copy
 from itertools import product, chain
 
@@ -11,7 +12,7 @@ from scipy.ndimage import label
 from scipy.signal import find_peaks
 from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize as skeletonize_skimage
-from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import DBSCAN, KMeans
 
 from config import get_area
@@ -52,7 +53,7 @@ def segment(bin_fig, arrows):
 
     # Choose kernel size according to skeletonized pixel ratio
     if 0.03 < skel_pixel_ratio:
-        kernel = 2
+        kernel = 4
         closed_fig = binary_close(bin_fig, size=kernel)
         log.debug("Segmentation kernel size = %s" % kernel)
 
@@ -77,7 +78,7 @@ def segment(bin_fig, arrows):
         log.debug("Segmentation kernel size = %s" % kernel)
 
     else:
-        kernel = 20
+        kernel = 25
         closed_fig = binary_close(bin_fig, size=kernel)
         log.debug("Segmentation kernel size = %s" % kernel)
 
@@ -170,12 +171,12 @@ def find_solid_arrows_main_routine(fig, threshold=None, min_arrow_length=None):
     # plt.plot(line2[0], line2[1])
     # plt.axis('off')
     # plt.show()
-    plt.imshow(fig.img, cmap=plt.cm.binary)
-    for line in lines:
-        x, y = list(zip(*line))
-        plt.plot(x,y)
-    plt.title('detected lines')
-    plt.show()
+    # plt.imshow(fig.img, cmap=plt.cm.binary)
+    # for line in lines:
+    #     x, y = list(zip(*line))
+    #     plt.plot(x,y)
+    # plt.title('detected lines')
+    # plt.show()
 
     for l in lines:
         points = [Point(row=y, col=x) for x, y in l]
@@ -285,7 +286,7 @@ def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrow
     """
     log.info('Looking for reactants and products around arrow %s', step_arrow)
     first_step = False
-    megabox_ccs = copy.deepcopy(step_conditions.text_lines)
+    megabox_ccs = copy.deepcopy(step_conditions.text_lines) if isinstance(step_conditions, Conditions) else []
     megabox_ccs.append(step_arrow)
     megabox = create_megabox(megabox_ccs)
     top_left = Point(row=megabox.top, col=megabox.left)
@@ -551,7 +552,7 @@ def match_function_and_smiles(reaction_step, smiles):
 
 def detect_structures(fig, ccs):
     """
-    Detects structures based on parameters such as size, aspect ratio and on/off pixel ratio
+    Detects structures based on parameters such as size, aspect ratio and number of detected lines
 
     :param Figure fig: analysed figure
     :param [Panels[ ccs: list of all connected components
@@ -561,36 +562,14 @@ def detect_structures(fig, ccs):
     ccs = list(ccs)
     # Get a rough bond length (line length) value from the two largest structures
     ccs = sorted(ccs, key=lambda cc: cc.area, reverse=True)
-    estimation_fig = isolate_patches(fig, ccs[:2])
-    estimation_fig = skeletonize(estimation_fig)
-    num_lines = []
+    estimation_fig = skeletonize(isolate_patches(fig, ccs[:2]))
     min_line_lengths = list(range(20, 60, 2))
-    for length in min_line_lengths:
-        lines = probabilistic_hough_line(estimation_fig.img, line_length=length, threshold=15)
-        plt.imshow(estimation_fig.img, cmap=plt.cm.binary)
-        # for line in lines:
-        #     p0, p1 = line
-        #     plt.plot((p0[0], p1[0]), (p0[1], p1[1]))
-        #
-        # plt.show()
-        num_lines.append(len(lines))
-
-    # plt.plot(min_line_lengths, num_lines)
-    # plt.show()
-    # Filter results without any lines (when the min_length is high only, so order is preserved)
-    num_lines = [number for number in num_lines if number > 10]  # Assume minimum number of lines in total to aid algorithm
-    print(num_lines)
-    # Calculate the differential for number of lines as the minimum line length is varied
-    dnumber = [num_lines[idx] - num_lines[idx-1] for idx in range(1, len(num_lines))]
-    grouped = list(zip(min_line_lengths, num_lines, dnumber)) # zips min_line_lengths starting from beginning up to
-    # length of num_lines
-    grouped = [record for record in grouped if record[2] < 0] # Filter out if number of lines increases when length is increased to
-    # get rid of noise
-
+    num_lines = [(length, len(probabilistic_hough_line(estimation_fig.img, line_length=length, threshold=15)))
+                    for length in min_line_lengths]
     # Choose the value where the number of lines starts to drop most rapidly and assign it as the boundary length
-    # TODO: Do I choose the value before or after the drop?
-    boundary_length, _, _ = sorted(grouped, key=lambda record: record[2])[0]
-    print(f'boundary length: {boundary_length}')
+    (boundary_length,_), (_, _) = min(zip(num_lines, num_lines[1:]), key= lambda pair: pair[1][1] - pair[0][1])  # the key is
+                                                                        # difference in number of detected lines
+                                                                        # between adjacent pairs
 
     # Use the length to find number of lines in each cc - this will be one of the used features
     cc_lines = []
@@ -619,33 +598,38 @@ def detect_structures(fig, ccs):
 
     cc_lines = np.array(cc_lines).reshape(-1,1)
     area = np.array([cc.area for cc in ccs]).reshape(-1, 1)
+    aspect_ratio = np.array([cc.aspect_ratio for cc in ccs]).reshape(-1, 1)
     mean_area = np.mean(area)
 
-    data = np.hstack((cc_lines, area))
-    data = standardize(data)
-    data = data.clip(min=0)
+    data = np.hstack((cc_lines, area, aspect_ratio))
+    # print(f'data: {data}')
+    data = MinMaxScaler().fit_transform(data)
+    distances = np.array([(x, y, z, np.sqrt(np.sqrt(x**2 + y**2)+z**2)) for x,y,z in data])
+    # print(f'transformed: {data}')
+    # print(f'distances: {distances}')
+    # data = data.clip(min=0)
     # data = cc_lines
     # print(f'data: {data}')
 
-    labels = DBSCAN(eps=1).fit_predict(data)
+    labels = DBSCAN(eps=0.1, min_samples=15).fit_predict(data)
 
     colors = ['b', 'm', 'g', 'r']
     paired = list(zip(ccs, labels))
+    paired = [(cc, label) if cc.area > mean_area else (cc,0) for cc, label in paired]
 
-
-    # if True:
-    #     f = plt.figure(figsize=(20, 20))
-    #     ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
-    #     ax.imshow(fig.img, cmap=plt.cm.binary)
-    #     # ax.set_title('structure identification')
-    #     for panel, label in paired:
-    #         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor=colors[label])
-    #         ax.add_patch(rect_bbox)
-    #     plt.savefig('backbones.tif')
-    #      plt.show()
+    if True:
+        f = plt.figure(figsize=(20, 20))
+        ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
+        ax.imshow(fig.img, cmap=plt.cm.binary)
+        # ax.set_title('structure identification')
+        for panel, label in paired:
+            rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor=colors[label])
+            ax.add_patch(rect_bbox)
+        #plt.savefig('backbones.tif')
+        plt.show()
     structures = [panel for panel, label in paired if label == -1]
 
-    return structures
+    return labels, distances[:,2]
 
 
 
