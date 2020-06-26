@@ -10,7 +10,7 @@ from matplotlib.patches import Rectangle
 
 from scipy.ndimage import label
 from scipy.signal import find_peaks
-from skimage.transform import probabilistic_hough_line
+from skimage.transform import probabilistic_hough_line, hough_line, hough_line_peaks
 from skimage.morphology import skeletonize as skeletonize_skimage
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import DBSCAN, KMeans
@@ -563,13 +563,17 @@ def detect_structures(fig, ccs):
     # Get a rough bond length (line length) value from the two largest structures
     ccs = sorted(ccs, key=lambda cc: cc.area, reverse=True)
     estimation_fig = skeletonize(isolate_patches(fig, ccs[:2]))
-    min_line_lengths = list(range(20, 60, 2))
-    num_lines = [(length, len(probabilistic_hough_line(estimation_fig.img, line_length=length, threshold=15)))
+    length_scan_start = 0.02 * max(fig.width, fig.height)
+    min_line_lengths = np.linspace(length_scan_start, 3*length_scan_start, 20)
+    # print(min_line_lengths)
+    # min_line_lengths = list(range(20, 60, 2))
+    num_lines = [(length, len(probabilistic_hough_line(estimation_fig.img, line_length=int(length), threshold=15))**2)
                     for length in min_line_lengths]
     # Choose the value where the number of lines starts to drop most rapidly and assign it as the boundary length
     (boundary_length,_), (_, _) = min(zip(num_lines, num_lines[1:]), key= lambda pair: pair[1][1] - pair[0][1])  # the key is
                                                                         # difference in number of detected lines
                                                                         # between adjacent pairs
+
 
     # Use the length to find number of lines in each cc - this will be one of the used features
     cc_lines = []
@@ -579,7 +583,14 @@ def detect_structures(fig, ccs):
         isolated_cc_fig = skeletonize(isolated_cc_fig)
         # lines = probabilistic_hough_line(isolated_cc_fig.img, line_length=boundary_length, threshold=15)  # Case study
         # all_lines.extend(lines)  # case study
-        num_lines = len(probabilistic_hough_line(isolated_cc_fig.img, line_length=boundary_length, threshold=15))
+        # hspace, angles, dists = hough_line(isolated_cc_fig.img)
+        # hspace, angles, dists = hough_line_peaks(hspace, angles, dists, threshold=boundary_length)
+        # num_lines = len(dists)
+        # print(f'num lines normal: {len(dists)}')
+        angles = np.linspace(-np.pi, np.pi, 360)
+        num_lines = len(probabilistic_hough_line(isolated_cc_fig.img,
+                                                 line_length=int(boundary_length), threshold=10, theta=angles))
+        # print(f'num lines prob: {num_lines}')
         cc_lines.append(num_lines)
 
     ##Case study only
@@ -601,23 +612,28 @@ def detect_structures(fig, ccs):
     aspect_ratio = np.array([cc.aspect_ratio for cc in ccs]).reshape(-1, 1)
     mean_area = np.mean(area)
 
+    print(f'boundary: {boundary_length}')
+    print(f'mean sqrt area: {np.sqrt(mean_area)}')
+
     data = np.hstack((cc_lines, area, aspect_ratio))
+    # print(f'data: \n {data}')
     # print(f'data: {data}')
     data = MinMaxScaler().fit_transform(data)
     distances = np.array([(x, y, z, np.sqrt(np.sqrt(x**2 + y**2)+z**2)) for x,y,z in data])
+    # print(f'transformed: \n {distances}')
     # print(f'transformed: {data}')
     # print(f'distances: {distances}')
     # data = data.clip(min=0)
     # data = cc_lines
     # print(f'data: {data}')
 
-    labels = DBSCAN(eps=0.1, min_samples=15).fit_predict(data)
+    labels = DBSCAN(eps=0.08, min_samples=20).fit_predict(data)
 
     colors = ['b', 'm', 'g', 'r']
     paired = list(zip(ccs, labels))
     paired = [(cc, label) if cc.area > mean_area else (cc,0) for cc, label in paired]
 
-    if True:
+    if False:
         f = plt.figure(figsize=(20, 20))
         ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
         ax.imshow(fig.img, cmap=plt.cm.binary)
@@ -629,7 +645,7 @@ def detect_structures(fig, ccs):
         plt.show()
     structures = [panel for panel, label in paired if label == -1]
 
-    return labels, distances[:,2]
+    return [label for cc, label in paired], distances[:,2]
 
 
 
