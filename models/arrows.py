@@ -30,11 +30,31 @@ class BaseArrow(Panel):
         self._center_px = None
         rows, cols = zip(*pixels)
         left = min(cols)
-        right = max(cols)
+        right = max(cols) + 1
         top = min(rows)
-        bottom = max(rows)
+        bottom = max(rows) + 1
         #print('left,right,top,bottom:', left, right, top, bottom)
-        super(BaseArrow,self).__init__(left=left, right=right, top=top, bottom=bottom)
+        self.panel = Panel(left=left, right=right, top=top, bottom=bottom)
+
+    @property
+    def left(self):
+        return self.panel.left
+
+    @property
+    def right(self):
+        return self.panel.right
+
+    @property
+    def top(self):
+        return self.panel.top
+
+    @property
+    def bottom(self):
+        return self.panel.bottom
+
+
+
+
 
     # @property
     # def centre_of_mass(self):

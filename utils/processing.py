@@ -799,3 +799,9 @@ def standardize(data):
     data -= feature_mean
     data /= feature_std
     return data
+
+
+
+
+
+

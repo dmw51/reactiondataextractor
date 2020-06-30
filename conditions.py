@@ -51,8 +51,8 @@ class ConditionParser:
     parse both integers and floating-point values.
     """
     default_values = r'((?:\d\.)?\d{1,2})'
-    cat_units = r'(mol\s?%)'
-    co_units = r'(equiv(?:alents?)?\.?)'
+    cat_units = r'(mol\s?%|M)'
+    co_units = r'(equiv(?:alents?)?\.?|m?L)'
 
     def __init__(self, sentences):
         self.sentences = sentences  # sentences are CDE Sentence objects
@@ -339,10 +339,13 @@ def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
     # plt.scatter(columns, rows, c='y', s=1)
     # plt.savefig('destination_path.jpg', format='jpg', dpi=1000)
     # plt.show()
+    if overlapped:
+        conditions_text = scan_conditions_text(fig, overlapped, arrow)
+        return conditions_text # Return as a set to allow handling along with product and reactant sets
 
-    conditions_text = scan_conditions_text(fig, overlapped, arrow)
+    else:
+        log.warning('No conditions were found in the initial scan. Aborting conditions search...')
 
-    return conditions_text # Return as a set to allow handling along with product and reactant sets
 
 
 def scan_conditions_text(fig, conditions, arrow, debug=False):

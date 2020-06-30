@@ -90,7 +90,8 @@ class ReactionStep(BaseReactionClass):
         self.reactants = reactants
         self.products = products
         self.conditions = conditions
-        self.conditions.text_lines.sort(key=lambda textline: textline.top)
+        if isinstance(self.conditions, Conditions):
+            self.conditions.text_lines.sort(key=lambda textline: textline.top)
         self._first = first   #  internal flag to indicate first step in a reaction
 
     def __eq__(self, other):

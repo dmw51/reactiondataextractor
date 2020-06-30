@@ -267,7 +267,7 @@ class Figure(object):
         self.img = img
 
         if isinstance(img, np.ndarray):
-            self.width, self.height = img.shape[0], img.shape[1]
+            self.width, self.height = img.shape[1], img.shape[0]
         elif isinstance(img, Rect):
             self.width = img.right-img.left
             self.height = img.bottom - img.top

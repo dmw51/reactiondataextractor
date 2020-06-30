@@ -645,7 +645,7 @@ def detect_structures(fig, ccs):
         plt.show()
     structures = [panel for panel, label in paired if label == -1]
 
-    return [label for cc, label in paired], distances[:,2]
+    return structures
 
 
 
@@ -704,9 +704,10 @@ def detect_structures(fig, ccs):
 
 
 
-def extend_line(line, extension):
+def extend_line(line, extension=None):
     """
-    Adds more points to the ``line`` in more directions, the extension length is dictated by ``extension``
+    Extends line in both directions. Output is a pair of points, each of which is further from an arrow (closer to
+    reactants or products in the context of reactions).
     :param Line line: original Line object
     :param int extension: value dictated how far the new line should extend in each direction
     :return: new Line object
@@ -715,24 +716,63 @@ def extend_line(line, extension):
     if slope is np.inf:  # vertical line
         line.pixels.sort(key=lambda point: point.row)
 
+
+        first_line_pixel = line.pixels[0]
+        last_line_pixel = line.pixels[-1]
+        if extension is None:
+            extension = int((last_line_pixel.separation(first_line_pixel)) * 0.4)
+
+        left_extended_point = Point(row=first_line_pixel.row - extension, col=first_line_pixel.col)
+        right_extended_point = Point(row=last_line_pixel.row + extension, col=last_line_pixel.col)
+
     else:
         line.pixels.sort(key=lambda point: point.col)
 
-    first_line_pixel = line.pixels[0]
-    last_line_pixel = line.pixels[-1]
+        first_line_pixel = line.pixels[0]
+        last_line_pixel = line.pixels[-1]
+        if extension is None:
+            extension = int((last_line_pixel.separation(first_line_pixel)) * 0.4)
 
-    left_extended_last_y = slope*(first_line_pixel-extension) + intercept
-    right_extended_last_y = slope*(last_line_pixel+extension) + intercept
+        left_extended_last_y = slope*(first_line_pixel.col-extension) + intercept
+        right_extended_last_y = slope*(last_line_pixel.col+extension) + intercept
 
-    left_extended_point = Point(row=left_extended_last_y, col=first_line_pixel.col-extension)
-    right_extended_point = Point(row=right_extended_last_y, col=last_line_pixel+extension)
+        left_extended_point = Point(row=left_extended_last_y, col=first_line_pixel.col-extension)
+        right_extended_point = Point(row=right_extended_last_y, col=last_line_pixel.col+extension)
 
-    extended = approximate_line(first_line_pixel, left_extended_point) +\
-               approximate_line(last_line_pixel, right_extended_point) + line
+    # extended = approximate_line(first_line_pixel, left_extended_point) +\
+    #            approximate_line(last_line_pixel, right_extended_point) + line
+    #
+    #
+    # new_line = Line(extended)
+
+    return (left_extended_point, right_extended_point)
 
 
-    new_line = Line(extended)
+def find_nearby_ccs(start, all_relevant_ccs, max_initial_distance):
+    """
+    Find all structures close to ``start`` position. All found structures are added to a queue and
+    checked again to form a cluster of nearby structures.
+    :param Point or (x,y) start: point where the search starts
+    :param [Panel,...] all_relevant_ccs: list of all found structures
+    :param float max_initial_distance: maximum allowed distance from the starting point
+    :return: List of all nearby structures
+    """
+    frontier = []
+    frontier.append(start)
+    found_structures = []
+    visited = set()
+    while frontier:
+        reference = frontier.pop()
+        visited.add(reference)
+        max_distance = max_initial_distance + 1.5 * np.sqrt(reference.area) if isinstance(reference, Panel) else max_initial_distance
+        seps = [structure.separation(reference) for structure in all_relevant_ccs]
+        successors = [structure for structure in all_relevant_ccs if structure.separation(reference) < max_distance
+                             and structure not in visited]
+        new_structures = [structure for structure in successors if structure not in found_structures]
+        frontier.extend(successors)
+        print(frontier)
+        found_structures.extend(new_structures)
 
-    return new_line
+    return found_structures
 
 
