@@ -23,7 +23,7 @@ from models.segments import Rect, Panel, Figure, TextLine
 from models.utils import Point, Line
 from utils.processing import approximate_line, create_megabox, merge_rect, pixel_ratio, binary_close, binary_floodfill, pad
 from utils.processing import (binary_tag, get_bounding_box, postprocessing_close_merge, erase_elements, crop, \
-                              is_slope_consistent, label_and_get_ccs, isolate_patches, standardize, get_line_parameters)
+                              is_slope_consistent, label_and_get_ccs, isolate_patches, standardize)
 from ocr import read_character
 
 log = logging.getLogger(__name__)
@@ -563,7 +563,8 @@ def detect_structures(fig, ccs):
     # Get a rough bond length (line length) value from the two largest structures
     ccs = sorted(ccs, key=lambda cc: cc.area, reverse=True)
     estimation_fig = skeletonize(isolate_patches(fig, ccs[:2]))
-    length_scan_start = 0.02 * max(fig.width, fig.height)
+    length_scan_param = 0.02 * max(fig.width, fig.height)
+    length_scan_start = length_scan_param if length_scan_param > 20 else 20
     min_line_lengths = np.linspace(length_scan_start, 3*length_scan_start, 20)
     # print(min_line_lengths)
     # min_line_lengths = list(range(20, 60, 2))
@@ -712,8 +713,8 @@ def extend_line(line, extension=None):
     :param int extension: value dictated how far the new line should extend in each direction
     :return: new Line object
     """
-    slope, intercept = get_line_parameters(line)
-    if slope is np.inf:  # vertical line
+
+    if line.slope is np.inf:  # vertical line
         line.pixels.sort(key=lambda point: point.row)
 
 
@@ -733,8 +734,8 @@ def extend_line(line, extension=None):
         if extension is None:
             extension = int((last_line_pixel.separation(first_line_pixel)) * 0.4)
 
-        left_extended_last_y = slope*(first_line_pixel.col-extension) + intercept
-        right_extended_last_y = slope*(last_line_pixel.col+extension) + intercept
+        left_extended_last_y = line.slope*(first_line_pixel.col-extension) + line.intercept
+        right_extended_last_y = line.slope*(last_line_pixel.col+extension) + line.intercept
 
         left_extended_point = Point(row=left_extended_last_y, col=first_line_pixel.col-extension)
         right_extended_point = Point(row=right_extended_last_y, col=last_line_pixel.col+extension)
