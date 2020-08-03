@@ -41,7 +41,7 @@ def prepare_text_for_ocr(fig,arrow):
     text_block = fig.get_bounding_box()
 
     ccs = label_and_get_ccs(fig)
-    top_boundaries, bottom_boundaries = conditions.identify_textlines(ccs, fig.img)
+    top_boundaries, bottom_boundaries = conditions.identify_text_lines(ccs, fig.img)
 
     textlines = [TextLine(0, fig.img.shape[1], upper, lower)
                  for upper, lower in zip(top_boundaries, bottom_boundaries)]

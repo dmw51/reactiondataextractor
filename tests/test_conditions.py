@@ -1,11 +1,28 @@
 import pytest
 from pprint import pprint
+import os
 
 from chemdataextractor.doc.text import Sentence, Span
-from conditions import ConditionParser
+from conditions import ConditionParser, mark_conditions_region
+from actions import find_solid_arrows,erase_elements
+from utils.io import imread
+from models.segments import Crop, Rect
 
 SENTENCES = [Sentence(text='LiOH (3 equiv.)'), Sentence(text='KMnO3 (1.5 equivalents'), Sentence(text='MnO2 (0.5 mol%'),
              Sentence(text='MeOH, BuOH, 2h'), Sentence(text='60oC, 2 bar')]
+
+MAIN_DIR = os.getcwd()
+PATH = os.path.join(MAIN_DIR, 'images', 'RDE_images', 'case_studies_1st_year')
+filename = 'jo0c00218_0003.jpeg'
+
+
+
+def test_find_step_conditions():
+    fig = imread(os.path.join(PATH, filename))
+    arrow = find_solid_arrows(fig)[0]
+    true_crop = Crop(erase_elements(fig, [arrow]), crop_params=Rect(259, 499, -14, 275))
+    found_crop = mark_conditions_region(fig, arrow)
+    assert found_crop == true_crop
 
 
 def test_identify_chemicals():
@@ -74,9 +91,10 @@ def test_parse_conditions():
 
 
 if __name__ == '__main__':
-    test_identify_chemicals()
-    test_parse_co_reactants()
-    test_parse_catalysis()
-    test_parse_other_species()
-    test_other_conditions()
-    test_parse_conditions()
+    test_find_step_conditions()
+    # test_identify_chemicals()
+    # test_parse_co_reactants()
+    # test_parse_catalysis()
+    # test_parse_other_species()
+    # test_other_conditions()
+    # test_parse_conditions()

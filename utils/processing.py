@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 
 
 from scipy import ndimage as ndi
+from scipy.signal import argrelmin
 from scipy.ndimage import label
 from scipy.ndimage import binary_closing, binary_dilation
 from skimage.color import rgb2gray
@@ -153,7 +154,7 @@ def erase_elements(fig, elements):
         flattened = fig.img.flatten()
         for element in elements:
             #print(arrow.pixels)
-            np.put(flattened, [x * fig.img.shape[1] + y for x, y in element.pixels], 0)
+            np.put(flattened, [pixel.row * fig.img.shape[1] + pixel.col for pixel in element.pixels], 0)
         img_no_elements = flattened.reshape(fig.img.shape[0], fig.img.shape[1])
         fig.img = img_no_elements
 
@@ -163,28 +164,17 @@ def erase_elements(fig, elements):
 
     return fig
 
-def dilate_fragments(fig, skel_pixel_ratio):
+def dilate_fragments(fig, kernel_size):
     """
-    Applies binary dilation to `fig.img` using a disk-shaped structuring element. Size of the element is determined by
-    the `skel_pixel_ratio`.
+    Applies binary dilation to `fig.img` using a disk-shaped structuring element of size ''kernel_size''.
     :param Figure fig: Processed figure
-    :param float skel_pixel_ratio: ratio of on/off pixels in `fig.img`
-    :return Figure: copy of `fig`
+    :param float kernel_size: size of the structuring element
+    :return Figure: new Figure object
     """
 
-    fig = copy.deepcopy(fig)
+    selem = disk(kernel_size)
 
-    if skel_pixel_ratio > 0.01:
-        radius = 4
-    else:
-        radius = 6
-
-    selem = disk(radius)
-
-    fig.img = binary_dilation(fig.img, selem)
-
-    return fig
-
+    return Figure(binary_dilation(fig.img, selem))
 
 
 def is_slope_consistent(lines):
@@ -194,23 +184,28 @@ def is_slope_consistent(lines):
     :param [((x1,y1), (x2,y2))] lines: iterable of pairs of coordinates
     :return: True if slope is similar amongst the lines, False otherwise
     """
+    if not all(isinstance(line, Line) for line in lines):
+        pairs = [[Point(*coords) for coords in pair] for pair in lines]
+        lines = [Line(pair) for pair in pairs]
 
-
-
+    if all(abs(line.slope) > 10 for line in lines):  # very high/low slope == inf
+        return True
     if all([line.slope == np.inf or line.slope == -np.inf for line in lines]):
         return True
+    slopes = [line.slope for line in lines if abs(line.slope) != np.inf]
     if any([line.slope == np.inf or line.slope == -np.inf for line in lines]):
         slopes = [line.slope for line in lines if abs(line.slope) != np.inf]
     avg_slope = np.mean(slopes)
     std_slope = np.std(slopes)
     abs_tol = 0.15
     rel_tol = 0.15
+
     tol = abs_tol if abs(avg_slope < 1) else rel_tol * avg_slope
-    print(f'avg slope: {avg_slope}, std_slope: {std_slope}')
     if std_slope > abs(tol):
         return False
 
     return True
+
 
 
 def approximate_line(point_1, point_2):
@@ -479,20 +474,20 @@ def intersect_rectangles(rect1, rect2):
 
 def belongs_to_textline(cropped_img, panel, textline,threshold=0.7):
     """
-    Return True if a panel belongs to a textline, False otherwise.
+    Return True if a panel belongs to a text_line, False otherwise.
     :param np.ndarray cropped_img: image cropped around text elements
     :param Panel panel: Panel containing connected component to check
     :param TextLine textline: Textline against which the panel is compared
-    :param float threshold: threshold for assigning a cc to a textline, ratio of on-pixels in a cc
+    :param float threshold: threshold for assigning a cc to a text_line, ratio of on-pixels in a cc
                             contained within the line
-    :return: bool True if panel lies on the textline
+    :return: bool True if panel lies on the text_line
     """
 
-    #print('running belongs to textline!')
-    if textline.contains(panel): #if textline covers the panel completely
+    #print('running belongs to text_line!')
+    if textline.contains(panel): #if text_line covers the panel completely
         return True
 
-    # If it doesn't, check if the main body of connected component is within the textline
+    # If it doesn't, check if the main body of connected component is within the text_line
     element = cropped_img[panel.top:panel.bottom, panel.left:panel.right]
     text_pixels = np.count_nonzero(element)
 
@@ -729,7 +724,51 @@ def standardize(data):
     data /= feature_std
     return data
 
+def find_minima_between_peaks(data, peaks):
+    """
+    Find deepest minima in ``data``, one between each adjacent pair of entries in ``peaks``, where ``data`` is a 2D
+    array describing kernel density estimate. Used to cut ``data`` into segments in a way that allows assigning samples
+    (used to create the estimate) to specific peaks.
+    :param np.ndarray data: analysed data
+    :param [int, int...] peaks: indices of peaks in ``data``
+    :return: np.ndarray containing the indices of local minima
+    """
+    pairs = zip(peaks, peaks[1:])
+    minima = []
+    for pair in pairs:
+        start, end = pair
+        min_idx = np.argmin(data[1, start:end])+start
+        minima.append(min_idx)
 
+    return minima
+    # return minima
+    # minima = argrelmin(data, axis=1)
+    # min_vals = data[1, minima[1]]
+    #
+    # indices = np.argsort(min_vals)[:n_minima]
+    # minima = minima[1][indices]
+    # minima = np.sort(data[0, minima].astype(int))
+    #
+    # return minima
+
+def is_a_single_line(fig, panel, line_length):
+    """
+    Checks if the connected component is a single line by checking slope consistency of lines between randomly
+    selected pixels
+    :return:
+    """
+
+    lines = probabilistic_hough_line(isolate_patches(fig, [panel]).img, line_length=line_length)
+    if not lines:
+        return False
+    # plt.imshow(temp_arr)
+
+    # for line in lines:
+    #     x, y = list(zip(*line))
+    #     plt.plot(x,y)
+    #
+    # plt.show()
+    return is_slope_consistent(lines)
 
 
 

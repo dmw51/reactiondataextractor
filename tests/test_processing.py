@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 
 from models.segments import Figure, Rect, Panel
 from utils.processing import (transform_panel_coordinates_to_expanded_rect, binary_tag,
-                              get_bounding_box, crop_rect, flatten_list, detect_headers)
+                              get_bounding_box, crop_rect, flatten_list, detect_headers,
+                              transform_panel_coordinates_to_shrunken_region)
 
 arr = np.zeros((100,100))
 arr[20:35,45:60] = 1

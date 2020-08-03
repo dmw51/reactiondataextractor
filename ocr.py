@@ -47,13 +47,14 @@ DIGITS = '0123456789'
 SUBSCRIPT = '₁₂₃₄₅₆₇₈₉ₓ₋'
 SUPERSCRIPT = '⁰°'
 ASSIGNMENT = ':=-'
-CONCENTRATION = '%()<>'
+CONCENTRATION = '%()'
 BRACKETS ='[]{}'
 SEPARATORS = ',. '
 OTHER = r'\'`/@'
 LABEL_WHITELIST = (ASSIGNMENT + DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION +
                    OTHER + SUBSCRIPT + SUPERSCRIPT + SEPARATORS)
-CONDITIONS_WHITELIST = DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION + SEPARATORS + BRACKETS + SUPERSCRIPT
+CONDITIONS_WHITELIST = DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION + SEPARATORS + BRACKETS + SUPERSCRIPT\
+                       + OTHER
 CHAR_WHITELIST = DIGITS + '+' + ALPHABET_UPPER
 
 OCR_CONFIDENCE = 0.7
@@ -90,9 +91,9 @@ def choose_best_ocr_configuration(img, psms=[], invert=True, x_offset=0, y_offse
 
     raw_results.sort(key=lambda result: result[1], reverse=True)
 
-    print(f'all ocr results: {raw_results}')
+    # print(f'all ocr results: {raw_results}')
     text, avg_conf = raw_results[0]
-    print(f' ocr text: {text}')
+    # print(f' ocr text: {text}')
 
     return raw_results[0]
 
@@ -183,17 +184,17 @@ def read_label(fig, label, whitelist=LABEL_WHITELIST):
 
 def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CONDITIONS_WHITELIST, pad_val=0):
     """
-    Reads conditions' text in `fig.img` detected inside `textline` and returns the recognised OCR objects.
+    Reads conditions' text in `fig.img` detected inside `text_line` and returns the recognised OCR objects.
     :param Figure fig: figure containing unprocessed image
     :param TextLine textline:  TextLine delimiting position of a single line of conditions' text
     :param str whitelist: all characters that will be looked for in the text
     :return: ?
     """
 
-    img = convert_greyscale(fig.img)
-
-    cropped_img = crop_rect(img, textline)
-    cropped_img = pad(cropped_img['img'], (10, 10))
+    # img = convert_greyscale(fig.img)   # Should  not be needed (pre-processed)
+    panel = textline.panel
+    crop = panel.create_crop(fig)
+    cropped_img = pad(crop.img, (10, 10))
     cropped_img = gaussian(cropped_img, sigma=0.5, mode='nearest')
     # plt.imshow(cropped_img)
     # plt.title('cropped condition text line')
@@ -202,7 +203,7 @@ def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CO
     # print(f'min of crop: {np.min(cropped_img)}')
     cropped_img = normalize_image(cropped_img)
 
-    text, avg_conf = choose_best_ocr_configuration(cropped_img, x_offset=textline.left, y_offset=textline.top,
+    text, avg_conf = choose_best_ocr_configuration(cropped_img, x_offset=panel.left, y_offset=panel.top,
                                             psms=[PSM.SINGLE_CHAR], whitelist=whitelist, pad_val=pad_val)
     raw_sentence = get_sentences(text)
 

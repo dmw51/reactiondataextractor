@@ -117,11 +117,11 @@ for file in os.listdir(PATH):
     # plt.show()
     # for conditions in all_conditions:
     #     print(f'conditions: {conditions}')
-    #     for textline in conditions:
-    #         print(f'textline: {textline}')
-    #         print(f'connected components: {textline.connected_components}')
-    #         textline.adjust_left_right()
-    #         text_block = create_megabox(textline)
+    #     for text_line in conditions:
+    #         print(f'text_line: {text_line}')
+    #         print(f'connected components: {text_line.connected_components}')
+    #         text_line.adjust_left_right()
+    #         text_block = create_megabox(text_line)
     #         print(text_block)
     #         cropped = crop_rect(fig_noarrows.img, text_block)
     #         plt.imshow(cropped['img'], cmap=plt.cm.binary)
