@@ -1,8 +1,8 @@
-from collections import namedtuple
+
 import pytest
 
-from models.reaction import ReactionStep, Reactant, Product
-from models.segments import Panel
+from models.reaction import ReactionStep, ChemicalStructure
+
 from models.output import ReactionScheme
 
 class ConditionsDummy:
@@ -12,6 +12,9 @@ class ConditionsDummy:
 
     def __str__(self):
         return str(self.dct)
+
+    def __getitem__(self, item):
+        return self.dct[item]
 
 class SpeciesDummy:
 
@@ -56,10 +59,10 @@ def test_create_graph_multiple_paths():
 def test_set_start_end_nodes_single_path():
     steps = [ReactionStep([r], [p], c) for r, p, c in zip(species[:3], species[1:4], conditions)][:2]
     for step in steps:
-        [setattr(s, '__class__', Reactant) for s in step.reactants]
+        [setattr(s, '__class__', ChemicalStructure) for s in step.reactants]
         [setattr(s, 'panel', (0, 0, 0, 0)) for s in step.reactants]
 
-        [setattr(s, '__class__', Product) for s in step.products]
+        [setattr(s, '__class__', ChemicalStructure) for s in step.products]
         [setattr(s, 'panel', (0, 0, 0, 0)) for s in step.products]
 
     scheme = ReactionScheme(steps)
@@ -72,10 +75,10 @@ def test_set_start_end_nodes_separate_paths():
     steps2 = [ReactionStep([r], [p], c) for r, p, c in zip(species[3:6], species[4:7], conditions[2:4])][:2]
     steps = steps1 + steps2
     for step in steps:
-        [setattr(s, '__class__', Reactant) for s in step.reactants]
+        [setattr(s, '__class__', ChemicalStructure) for s in step.reactants]
         [setattr(s, 'panel', (0, 0, 0, 0)) for s in step.reactants]
 
-        [setattr(s, '__class__', Product) for s in step.products]
+        [setattr(s, '__class__', ChemicalStructure) for s in step.products]
         [setattr(s, 'panel', (0, 0, 0, 0)) for s in step.products]
 
     scheme = ReactionScheme(steps)
@@ -91,10 +94,10 @@ def test_set_start_end_nodes_multiple_products():
     steps = steps1+branched_steps
 
     for step in steps:
-        [setattr(s, '__class__', Reactant) for s in step.reactants]
+        [setattr(s, '__class__', ChemicalStructure) for s in step.reactants]
         [setattr(s, 'panel', (0, 0, 0, 0)) for s in step.reactants]
 
-        [setattr(s, '__class__', Product) for s in step.products]
+        [setattr(s, '__class__', ChemicalStructure) for s in step.products]
         [setattr(s, 'panel', (0, 0, 0, 0)) for s in step.products]
 
     scheme = ReactionScheme(steps)
@@ -154,8 +157,27 @@ def test_to_json_multiple_products():
 
     assert scheme.to_json() == true_json
 
+def test_to_smirks():
+    """This is a simple SMIRKS conversion test, SMIRKS only works for simple reactions"""
+    #setup
+    coreactant1 = dict([['Species', 'ABC']])
+    coreactant2 = dict([['Species', 'CDE']])
+    other1 = 'ghi'
+    dct = dict((('coreactants', [coreactant1, coreactant2]), ('other species', [other1]), ('catalysts', [])))
+    cond = ConditionsDummy(dct)
+    step = ReactionStep([species[0]], [species[1]], cond)
+
+    #similarly to previous tests, need to set these manually for the algorithm to work
+    [setattr(s, '__class__', ChemicalStructure) for s in step.reactants]
+    [setattr(s, 'panel', (0, 0, 0, 0)) for s in step.reactants]
+
+    [setattr(s, '__class__', ChemicalStructure) for s in step.products]
+    [setattr(s, 'panel', (0, 0, 0, 0)) for s in step.products]
 
 
+    scheme = ReactionScheme([step])
+    true_smirks = 'a>ABC.CDE.ghi>b'
+    assert scheme.to_smirks() == true_smirks, [cond]
 
 
 
@@ -168,4 +190,4 @@ if __name__ == '__main__':
     test_to_json_single_path()
     test_to_json_separate_paths()
     test_to_json_multiple_products()
-
+    test_to_smirks()

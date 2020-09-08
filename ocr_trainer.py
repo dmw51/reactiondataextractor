@@ -13,7 +13,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
 
-from utils.io import imread
+from utils.io_ import imread
 from utils.processing import label_and_get_ccs, crop_rect
 import conditions
 from actions import find_solid_arrows, erase_elements

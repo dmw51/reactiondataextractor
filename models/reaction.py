@@ -4,58 +4,15 @@ from __future__ import print_function
 from __future__ import unicode_literals
 import logging
 
-import copy
-from itertools import product, tee
-import numpy as np
-from enum import Enum
-
-from utils.processing import remove_small_fully_contained
+from models.segments import Panel
 
 log = logging.getLogger(__name__)
-
-
-
 
 
 class BaseReactionClass(object):
     """
     This is a base reaction class placeholder
     """
-
-
-# class Reaction(BaseReactionClass):
-#     @classmethod
-#     def from_reaction_steps(cls, steps):
-#         """
-#         Given reactions steps forming the reaction, return a Reaction object with steps ordered in a list
-#
-#         :param [ReactionStep,...] steps: list of all involved reaction steps
-#         :return: Reactio object - an iterator over the reaction steps
-#         """
-#         ordered_steps = []
-#         try:
-#             first_step = [step for step in steps if step.first][0]
-#         except IndexError:
-#             log.warning('First step of the reaction was not found.')
-#             return None
-#
-#         # TODO: Exception handling for above
-#         ordered_steps.append(first_step)
-#
-#         compare_to_step = first_step
-#         changes = True
-#         while changes:
-#             changes = False
-#             for step in steps:
-#                 if set(step.reactants) == set(compare_to_step.products):
-#                     changes = True
-#                     ordered_steps.append(step)
-#                     compare_to_step = step
-#
-#         return Reaction(steps=ordered_steps)
-#
-#     def __init__(self, steps):
-#         self.steps = steps
 
 
 class ChemicalStructure(BaseReactionClass):
@@ -78,7 +35,7 @@ class ChemicalStructure(BaseReactionClass):
         return hash(self.panel)
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(connected_component={self.panel}, smiles={self.smiles}, label={self.label})'
+        return f'{self.__class__.__name__}(panel={self.panel}, smiles={self.smiles}, label={self.label})'
 
     def __str__(self):
         return f'{self.smiles}, label: {self.smiles}'
@@ -94,7 +51,7 @@ class ReactionStep(BaseReactionClass):
         self.conditions = conditions
 
     def __eq__(self, other):
-        return (self.arrow == other.arrow and self.reactants == other.reactants and self.products == other.products and
+        return (self.reactants == other.reactants and self.products == other.products and
                 self.conditions == other.conditions)
 
     def __repr__(self):
@@ -104,16 +61,53 @@ class ReactionStep(BaseReactionClass):
         return '+'.join(self.reactants)+'-->'+'+'.join(self.products)
 
     def __hash__(self):
-        return hash(self.arrow) + hash(self.conditions)
+        all_species = [species for group in iter(self) for species in group]
+        species_hash = sum([hash(species) for species in all_species])
+        return hash(self.conditions) + species_hash
 
     def __iter__(self):
         return iter ((self.reactants, self.products))
 
-    @property
-    def first(self):
-        return self._first
+    def match_function_and_smiles(self, csr_output):
+        """
+        Matches the resolved smiles from chemschematicresolver with roles (reactant, product) found by the segmentation
+        algorithm.
 
+        :param [[smile], [ccs]] csr_output: list of lists containing structures converted into SMILES format and recognised
+         labels, and connected components depicting the structures in an image
+        :return: bool True if matching successful else False
+        """
+        smile_panel_pairs = list(zip(*csr_output))
+        for reactant in self.reactants:
+            matching_record = [recognised for recognised, diag in smile_panel_pairs
+                               if Panel(diag.left, diag.right, diag.top, diag.bottom) == reactant.panel]
+            # This __eq__ is based on a flaw in csr - cc is of type `Label`, but inherits from Rect
+            if matching_record:
+                matching_record = matching_record[0]
+                reactant.label = matching_record[0]
+                reactant.smiles = matching_record[1]
+            else:
+                log.warning('No SMILES match was found for a reactant structure')
 
+        for product in self.products:
+
+            matching_record = [recognised for recognised, diag in smile_panel_pairs
+                               if diag == product.panel]
+            # This __eq__ is based on flaw in csr - cc is of type `Diagram`, but inherits from Rect
+            if matching_record:
+                matching_record = matching_record[0]
+                product.label = matching_record[0]
+                product.smiles = matching_record[1]
+            else:
+                log.warning('No SMILES match was found for a product structure')
+
+        if all([reactant.smiles for reactant in self.reactants]) and \
+            all ([product.smiles for product in self.products]):
+            print('all structures were translated to SMILES')
+            return True
+        else:
+            print('No SMILES were found for some structures - extraction unsuccessful')
+            return False
 
 
 class Conditions:
@@ -137,9 +131,19 @@ class Conditions:
         if other.__class__ == self.__class__:
             return self.conditions_dct == other.conditions_dct
 
+        else:
+            return False
+    #
+    # def __getitem__(self, item):
+    #     return self.conditions_dct[item]
+
     def __hash__(self):
         return hash(sum(hash(line) for line in self.text_lines))
 
+    @property
+    def anchor(self):
+        a_pixels = self.arrow.pixels
+        return a_pixels[len(a_pixels)//2]
     @property
     def co_reactants(self):
         return self.conditions_dct['co-reactants']
@@ -171,23 +175,4 @@ class Conditions:
 
 
 
-class Reactant(ChemicalStructure):
-    """
-    This class describes reactants
-    """
-    def __init__(self, connected_components):
-        super(Reactant, self).__init__(connected_components)
-
-class Intermediate(ChemicalStructure):
-    """
-    This class describes reaction intermediates
-    """
-    def __init__(self, connected_components):
-        super(Intermediate, self).__init__(connected_components)
-
-class Product(ChemicalStructure):
-    """
-    This class describes final reaction products
-    """
-    def __init__(self, connected_components):
-        super(Product, self).__init__(connected_components)
+#

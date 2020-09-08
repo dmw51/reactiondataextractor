@@ -26,9 +26,14 @@ class Point:
     def __hash__(self):
         return hash(self.row + self.col)
 
+    # def __repr__(self):
+    #     return f'{self.__class__.__name__}{self.row, self.col}'
+
+    def __str__(self):
+        return f'{self.row, self.col}'
 
     def __repr__(self):
-        return f'{self.__class__.__name__}{self.row, self.col}'
+        return self.__str__()   # to de-clutter more complex objects
 
     def separation(self, other):
         """

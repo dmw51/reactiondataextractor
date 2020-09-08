@@ -1,17 +1,16 @@
 import copy
-from collections.abc import Container, Iterable
+from collections.abc import Container
 import math
 import numpy as np
 import matplotlib.pyplot as plt
 
 
 from scipy import ndimage as ndi
-from scipy.signal import argrelmin
 from scipy.ndimage import label
 from scipy.ndimage import binary_closing, binary_dilation
 from skimage.color import rgb2gray
 from skimage.measure import regionprops
-from skimage.morphology import disk, skeletonize, rectangle
+from skimage.morphology import disk, rectangle
 from skimage.transform import probabilistic_hough_line
 from skimage.util import pad
 from skimage.util import crop as crop_skimage
@@ -47,15 +46,15 @@ def crop(img, left=None, right=None, top=None, bottom=None):
     :rtype: numpy.ndarray
     """
 
-
     height, width = img.shape[:2]
 
     left = max(0, left if left else 0)
     right = min(width, right if right else width)
     top = max(0, top if top else 0)
-    bottom = min(height,bottom if bottom else width)
+    bottom = min(height, bottom if bottom else width)
     out_img = img[top: bottom, left: right]
-    return {'img':out_img, 'rectangle':Rect(left,right,top,bottom)}
+    return {'img': out_img, 'rectangle': Rect(left, right, top, bottom)}
+
 
 def crop_rect(img, rect_boundary):
     """
@@ -72,19 +71,20 @@ def crop_rect(img, rect_boundary):
 
 def binary_close(fig, size=5):
     """ Joins unconnected pixel by dilation and erosion"""
-    fig = copy.deepcopy(fig)
+
     selem = disk(size)
 
-    fig.img = pad(fig.img, size, mode='constant')
-    fig.img = binary_closing(fig.img, selem)
-    fig.img = crop_skimage(fig.img, size)
-    return fig
+    img = pad(fig.img, size, mode='constant')
+    img = binary_closing(img, selem)
+    img = crop_skimage(img, size)
+    return Figure(img, raw_img=fig.raw_img)
 
 
 def binary_floodfill(fig):
     """ Converts all pixels inside closed contour to 1"""
     fig.img = ndi.binary_fill_holes(fig.img)
     return fig
+
 
 def pixel_ratio(fig, diag):
     """ Calculates the ratio of 'on' pixels to bounding box area for binary figure
@@ -104,6 +104,7 @@ def pixel_ratio(fig, diag):
     all_pixels = np.size(cropped_img)
     ratio = ones / all_pixels
     return ratio
+
 
 def get_bounding_box(fig):
     """ Gets the bounding box of each segment
@@ -153,7 +154,7 @@ def erase_elements(fig, elements):
     try:
         flattened = fig.img.flatten()
         for element in elements:
-            #print(arrow.pixels)
+            # print(arrow.pixels)
             np.put(flattened, [pixel.row * fig.img.shape[1] + pixel.col for pixel in element.pixels], 0)
         img_no_elements = flattened.reshape(fig.img.shape[0], fig.img.shape[1])
         fig.img = img_no_elements
@@ -164,17 +165,17 @@ def erase_elements(fig, elements):
 
     return fig
 
+
 def dilate_fragments(fig, kernel_size):
     """
     Applies binary dilation to `fig.img` using a disk-shaped structuring element of size ''kernel_size''.
     :param Figure fig: Processed figure
-    :param float kernel_size: size of the structuring element
+    :param int kernel_size: size of the structuring element
     :return Figure: new Figure object
     """
-
     selem = disk(kernel_size)
 
-    return Figure(binary_dilation(fig.img, selem))
+    return Figure(binary_dilation(fig.img, selem), raw_img=fig.raw_img)
 
 
 def is_slope_consistent(lines):
@@ -207,7 +208,6 @@ def is_slope_consistent(lines):
     return True
 
 
-
 def approximate_line(point_1, point_2):
     """
     Implementation of a Bresenham's algorithm. Approximates a straight line between ``point_1`` and ``point_2`` with
@@ -236,9 +236,11 @@ def approximate_line(point_1, point_2):
 def bresenham_line_x_dominant(point_1, point_2, slope):
     """
     bresenham algorithm implementation when change in x is larger than change in y
-    :param point_1:
-    :param point_2:
-    :return:
+
+    :param Point point_1: one endpoint of a line
+    :param Point point_2: other endpoint of a line
+    :param float slope: pre-calculated slope of the line
+    :return: Line formed between the two points
     """
     y1 = point_1.row
     y2 = point_2.row
@@ -260,11 +262,14 @@ def bresenham_line_x_dominant(point_1, point_2, slope):
 
     return Line(pixels=pixels)
 
+
 def bresenham_line_y_dominant(point_1, point_2, slope):
-    """
-    :param point_1:
-    :param point_2:
-    :return:
+    """bresenham algorithm implementation when change in y is larger than change in x
+
+    :param Point point_1: one endpoint of a line
+    :param Point point_2: other endpoint of a line
+    :param float slope: pre-calculated slope of the line
+    :return: Line formed between the two points
     """
 
     x1 = point_1.col
@@ -287,32 +292,20 @@ def bresenham_line_y_dominant(point_1, point_2, slope):
 
     return Line(pixels=pixels)
 
+
 def create_megabox(boxes):
     """
-    :param iterable conditions: list of conditions bounding boxes
-    :param Arrow arrow: Arrow object to which the conditions below
-    :param bool dense_graph: flag to indicate a high density of features around arrow and conditions
+    :param iterable boxes: list of bounding boxes to combine into a larger box
     :return: megabox
     """
-    #print('boxes:', boxes)
+    # print('boxes:', boxes)
     top = min(rect.top for rect in boxes)
     bottom = max(rect.bottom for rect in boxes)
     left = min(rect.left for rect in boxes)
     right = max(rect.right for rect in boxes)
 
-    megabox = Rect(top=top, bottom=bottom, left=left, right=right)
+    megabox = boxes[0].__class__(top=top, bottom=bottom, left=left, right=right)
     return megabox
-
-
-def get_unclassified_ccs(all_ccs, *classified_ccs):
-    """
-    Performs set difference between all_ccs and classified_ccs (in this order) to giver leftover,
-    unclassified ccs.
-
-    :param set all_ccs: set of all connected components
-    :param iterable of sets classified_ccs: list of sets containing classified ccs
-    :return set: remaining, unclassified components
-    """
 
 
 def remove_small_fully_contained(connected_components):
@@ -323,7 +316,7 @@ def remove_small_fully_contained(connected_components):
     """
     enclosed_ccs = [small_cc for small_cc in connected_components if any(large_cc.contains(small_cc) for large_cc
                     in remove_connected_component(small_cc, connected_components))]
-    #print(enclosed_ccs)
+    # print(enclosed_ccs)
     refined_ccs = connected_components.difference(set(enclosed_ccs))
     return refined_ccs
 
@@ -417,7 +410,7 @@ def isolate_patches(fig, to_isolate):
         right = connected_component.right
         isolated[top:bottom, left:right] = fig.img[top:bottom, left:right]
 
-    return Figure(img=isolated)
+    return Figure(img=isolated, raw_img=fig.raw_img)
 
 
 def postprocessing_close_merge(fig, to_close):
@@ -445,9 +438,9 @@ def preprocessing_remove_long_lines(fig):
     fig = copy.deepcopy(fig)
     threshold = int(fig.diagonal//2)
     print(threshold)
-    long_lines = probabilistic_hough_line(fig.img, threshold=threshold) # Output is two endpoints per line
+    long_lines = probabilistic_hough_line(fig.img, threshold=threshold)  # Output is two endpoints per line
     labelled_img, _ = label(fig.img)
-    long_lines_list =[]
+    long_lines_list = []
     for line in long_lines:
         points = [Point(row=y, col=x) for x, y in line]
         p1 = points[0]
@@ -472,34 +465,34 @@ def intersect_rectangles(rect1, rect2):
     bottom = min(rect1.bottom, rect2.bottom)
     return Rect(left, right, top, bottom)
 
-def belongs_to_textline(cropped_img, panel, textline,threshold=0.7):
-    """
-    Return True if a panel belongs to a text_line, False otherwise.
-    :param np.ndarray cropped_img: image cropped around text elements
-    :param Panel panel: Panel containing connected component to check
-    :param TextLine textline: Textline against which the panel is compared
-    :param float threshold: threshold for assigning a cc to a text_line, ratio of on-pixels in a cc
-                            contained within the line
-    :return: bool True if panel lies on the text_line
-    """
-
-    #print('running belongs to text_line!')
-    if textline.contains(panel): #if text_line covers the panel completely
-        return True
-
-    # If it doesn't, check if the main body of connected component is within the text_line
-    element = cropped_img[panel.top:panel.bottom, panel.left:panel.right]
-    text_pixels = np.count_nonzero(element)
-
-    shared_space = intersect_rectangles(panel, textline)
-    cropped_element = cropped_img[shared_space.top:shared_space.bottom,
-                      shared_space.left:shared_space.right]
-
-    shared_text_pixels = np.count_nonzero(cropped_element)
-    if shared_text_pixels/text_pixels > threshold:
-        return True
-
-    return False
+# def belongs_to_textline(cropped_img, panel, textline,threshold=0.7):
+#     """
+#     Return True if a panel belongs to a text_line, False otherwise.
+#     :param np.ndarray cropped_img: image cropped around text elements
+#     :param Panel panel: Panel containing connected component to check
+#     :param TextLine textline: Textline against which the panel is compared
+#     :param float threshold: threshold for assigning a cc to a text_line, ratio of on-pixels in a cc
+#                             contained within the line
+#     :return: bool True if panel lies on the text_line
+#     """
+#
+#     #print('running belongs to text_line!')
+#     if textline.contains(panel): #if text_line covers the panel completely
+#         return True
+#
+#     # If it doesn't, check if the main body of connected component is within the text_line
+#     element = cropped_img[panel.top:panel.bottom, panel.left:panel.right]
+#     text_pixels = np.count_nonzero(element)
+#
+#     shared_space = intersect_rectangles(panel, textline)
+#     cropped_element = cropped_img[shared_space.top:shared_space.bottom,
+#                       shared_space.left:shared_space.right]
+#
+#     shared_text_pixels = np.count_nonzero(cropped_element)
+#     if shared_text_pixels/text_pixels > threshold:
+#         return True
+#
+#     return False
 
 
 def is_boundary_cc(img, cc):
@@ -512,24 +505,24 @@ def is_boundary_cc(img, cc):
     return False
 
 
-def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
-    """
-    Used to detect small characters - eg subscripts, which have less stringent threshold criteria
-    :param np.ndarray cropped_img: image cropped around condition text elements
-    :param Panel cc: any connected component
-    :param float mean_character_area: mean connected component area in `cropped_img`
-    :param Panel textline: Panel containing a text line
-    :return: bool True if a small character, False otherwise
-    """
-    crop_area = cropped_img.shape[0] * cropped_img.shape[1]
-    #print(f'area: {crop_area}')
-    if cc.area < 0.9 * mean_character_area:
-        #print(f'satisfied area criterion!')
-        if belongs_to_textline(cropped_img, cc, textline, threshold=0.5):
-            #print('satisifies thresholding?')
-            return True
-
-    return False
+# def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
+#     """
+#     Used to detect small characters - eg subscripts, which have less stringent threshold criteria
+#     :param np.ndarray cropped_img: image cropped around condition text elements
+#     :param Panel cc: any connected component
+#     :param float mean_character_area: mean connected component area in `cropped_img`
+#     :param Panel textline: Panel containing a text line
+#     :return: bool True if a small character, False otherwise
+#     """
+#     crop_area = cropped_img.shape[0] * cropped_img.shape[1]
+#     #print(f'area: {crop_area}')
+#     if cc.area < 0.9 * mean_character_area:
+#         #print(f'satisfied area criterion!')
+#         if belongs_to_textline(cropped_img, cc, textline, threshold=0.5):
+#             #print('satisifies thresholding?')
+#             return True
+#
+#     return False
 
 
 def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, absolute=False):
@@ -545,9 +538,9 @@ def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, 
 
     new_panels = []
     if not absolute:
-        expanded_rect = Rect(0, 0, 0, 0) # This is just to simplify the function
+        expanded_rect = Rect(0, 0, 0, 0)  # This is just to simplify the function
     for cc in ccs:
-        cc = copy.deepcopy(cc) # to avoid side effects
+        cc = copy.deepcopy(cc)  # to avoid side effects
         height = cc.bottom - cc.top
         width = cc.right - cc.left
 
@@ -566,10 +559,10 @@ def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, 
 
 def transform_panel_coordinates_to_shrunken_region(cropped_region, ccs):
 
-    if not isinstance(ccs, Container): # This is just for convenience
+    if not isinstance(ccs, Container):  # This is just for convenience
         ccs = [ccs]
 
-    new_panels =[]
+    new_panels = []
     for cc in ccs:
         height = cc.bottom - cc.top
         width = cc.right - cc.left
@@ -636,59 +629,61 @@ def detect_rectangle_boxes(fig, greedy=False):
     return rects
 
 
-def detect_headers(fig):
-    # Detects too much - also labels - need a reliable way to distinguish between the two (could use try block as safety net)
-    """
-    Attempts to detect header text in reaction schemes. This text usually contains additional, superfluous information.
-    :param Figure fig: Analysed figure
-    :return: iterable of connected components corresponding to header text (if any)
-    """
-
-    # Look at the LHS of image for any text (assume multiple headers for multiple reactions)
-    fig = copy.copy(fig)
-    right = int(fig.img.shape[1] * 0.05) if fig.img.shape[1] < 2000 else 100
-    # header_start_crop = crop(fig.img, left=0, right=right, top=0, bottom=fig.img.shape[0])['img']
-    ccs = label_and_get_ccs(fig)
-
-    header_start_cand = [cc for cc in ccs if cc.right < right]
-
-    plt.imshow(fig.img)
-    plt.show()
-    # print(f'headers: {headers}')
-    #(structures)
-
-    if not header_start_cand:
-        return
-
-    # For now, assume no labels were captured
-    detected_headers = []
-    print(f'candidate headers: {header_start_cand}')
-    for header in header_start_cand:
-        tol = int(header.height * 0.4)
-        # Crop a horizontal line containing the header start
-
-        header_line_cands = [cc for cc in ccs if cc.top > header.top-tol and cc.bottom < header.bottom+tol]
-        print(f'header candidates: {header_line_cands}')
-        isolated_line = isolate_patches(fig, header_line_cands)
-
-        closed_line = Figure(binary_dilation(isolated_line.img, structure=rectangle(1, 30)))  # close horizontally only
-        #that looked ugly, make a wrapper func to handle appropriate types?
-        plt.imshow(closed_line.img)
-        plt.title('dilated')
-        plt.show()
-        line_cc = label_and_get_ccs(closed_line)
-        line_cc = [cc for cc in line_cc if cc.overlaps(header)][0] # only take the one large cc that contains the
-        # original header cc
-        print(f'line cc: {line_cc}')
-        # the problem is with following line - I need to remove things I'm sure aren't headers (eg structures)
-        header_ccs = [cc for cc in ccs if line_cc.overlaps(cc) and cc.area < 3 * header.area] # to get rid of structures
-
-        if header_ccs not in detected_headers:
-            detected_headers.append(header_ccs)
-
-
-    return detected_headers
-
+# def detect_headers(fig):
+#     # Detects too much - also labels - need a reliable way to distinguish between the
+#     two (could use try block as safety net)
+#     """
+#     Attempts to detect header text in reaction schemes. This text usually contains additional, superfluous information
+#     :param Figure fig: Analysed figure
+#     :return: iterable of connected components corresponding to header text (if any)
+#     """
+#
+#     # Look at the LHS of image for any text (assume multiple headers for multiple reactions)
+#     fig = copy.copy(fig)
+#     right = int(fig.img.shape[1] * 0.05) if fig.img.shape[1] < 2000 else 100
+#     # header_start_crop = crop(fig.img, left=0, right=right, top=0, bottom=fig.img.shape[0])['img']
+#     ccs = label_and_get_ccs(fig)
+#
+#     header_start_cand = [cc for cc in ccs if cc.right < right]
+#
+#     plt.imshow(fig.img)
+#     plt.show()
+#     # print(f'headers: {headers}')
+#     #(structures)
+#
+#     if not header_start_cand:
+#         return
+#
+#     # For now, assume no labels were captured
+#     detected_headers = []
+#     print(f'candidate headers: {header_start_cand}')
+#     for header in header_start_cand:
+#         tol = int(header.height * 0.4)
+#         # Crop a horizontal line containing the header start
+#
+#         header_line_cands = [cc for cc in ccs if cc.top > header.top-tol and cc.bottom < header.bottom+tol]
+#         print(f'header candidates: {header_line_cands}')
+#         isolated_line = isolate_patches(fig, header_line_cands)
+#
+#         closed_line = Figure(binary_dilation(isolated_line.img, structure=rectangle(1, 30)))
+# close horizontally only
+#         #that looked ugly, make a wrapper func to handle appropriate types?
+#         plt.imshow(closed_line.img)
+#         plt.title('dilated')
+#         plt.show()
+#         line_cc = label_and_get_ccs(closed_line)
+#         line_cc = [cc for cc in line_cc if cc.overlaps(header)][0] # only take the one large cc that contains the
+#         # original header cc
+#         print(f'line cc: {line_cc}')
+#         # the problem is with following line - I need to remove things I'm sure aren't headers (eg structures)
+#         header_ccs = [cc for cc in ccs if line_cc.overlaps(cc) and cc.area < 3 * header.area]
+# to get rid of structures
+#
+#         if header_ccs not in detected_headers:
+#             detected_headers.append(header_ccs)
+#
+#
+#     return detected_headers
 
     # Expand in horizontal direction around each found header start
     # Close to find the whole header
@@ -710,6 +705,7 @@ def normalize_image(img):
 
     return img
 
+
 def standardize(data):
     """
     Standardizes data to mean 0 and standard deviation of 1
@@ -723,6 +719,7 @@ def standardize(data):
     data -= feature_mean
     data /= feature_std
     return data
+
 
 def find_minima_between_peaks(data, peaks):
     """
@@ -751,6 +748,7 @@ def find_minima_between_peaks(data, peaks):
     #
     # return minima
 
+
 def is_a_single_line(fig, panel, line_length):
     """
     Checks if the connected component is a single line by checking slope consistency of lines between randomly
@@ -769,7 +767,3 @@ def is_a_single_line(fig, panel, line_length):
     #
     # plt.show()
     return is_slope_consistent(lines)
-
-
-
-

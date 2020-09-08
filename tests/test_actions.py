@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from models.segments import Rect, Panel
-from models.reaction import ReactionStep, Reactant, Product
+from models.reaction import ReactionStep, ChemicalStructure, ChemicalStructure
 from models.arrows import SolidArrow
 from models.utils import Line, Point
 
@@ -244,8 +244,8 @@ def test_match_function_and_smiles():
                Rect(left=260, right=376, top=29, bottom=176)])
 
 
-    reactants = [Reactant(Rect (0, 186, 6, 193)), Reactant(Rect(260, 376, 29, 176))]
-    products = [Product(Rect(711, 948, 0, 200))]
+    reactants = [ChemicalStructure(Rect (0, 186, 6, 193)), ChemicalStructure(Rect(260, 376, 29, 176))]
+    products = [ChemicalStructure(Rect(711, 948, 0, 200))]
     reaction_step = ReactionStep(None, reactants, products, None)
     cc1 = smiles[1][0]
 

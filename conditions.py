@@ -21,23 +21,26 @@ from sklearn.cluster import DBSCAN
 from sklearn.neighbors import KernelDensity
 from sklearn.model_selection import GridSearchCV
 
-from actions import skeletonize_area_ratio, detect_structures, find_nearby_ccs
+from actions import skeletonize_area_ratio, detect_structures, find_nearby_ccs, extend_line
 from correct import Correct
 from models.reaction import Conditions
 from models.arrows import SolidArrow
-from models.segments import Rect, Figure, TextLine, Crop, RoleEnum
-from models.utils import Point
+from models.segments import Rect, Figure, TextLine, Crop, FigureRoleEnum, ReactionRoleEnum
+from models.utils import Point, Line
 from utils.processing import approximate_line, create_megabox, find_minima_between_peaks
 from utils.processing import (binary_tag, get_bounding_box, erase_elements, belongs_to_textline, is_boundary_cc,
                               isolate_patches, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region,
                               label_and_get_ccs)
+
+from chemschematicresolver.actions import read_diagram_pyosra
 
 
 from ocr import read_conditions, read_isolated_conditions
 from chemdataextractor.doc import Paragraph, Span
 from matplotlib.patches import Rectangle
 
-log = logging.getLogger(__name__)
+log = logging.getLogger('extract.conditions')
+
 
 
 class ConditionParser:
@@ -55,7 +58,8 @@ class ConditionParser:
     cat_units = r'(mol\s?%|M)'
     co_units = r'(equiv(?:alents?)?\.?|m?L)'
 
-    def __init__(self, sentences):
+    def __init__(self, sentences, ):
+
         self.sentences = sentences  # sentences are CDE Sentence objects
 
     def parse_conditions(self):
@@ -78,7 +82,7 @@ class ConditionParser:
         conditions_dct['coreactants'] = coreactants_lst
         conditions_dct['catalysts'] = catalysis_lst
         conditions_dct['other species'] = other_species_lst
-        pprint(conditions_dct)
+        # pprint(conditions_dct)
         return conditions_dct
 
     @staticmethod
@@ -186,8 +190,7 @@ class ConditionParser:
         time = re.search(time_str, sentence.text)
         if time:
             return {'Value': float(time.group(1)), 'Units': time.group(2)}
-        else:
-            log.info('Time was not found for...')
+
 
     @staticmethod
     def _parse_temperature(sentence):
@@ -208,8 +211,6 @@ class ConditionParser:
                 return {'Value': float(temperature.group(1)), 'Units': units}
             except ValueError:
                 return {'Value': temperature.group(1), 'Units': units}   # if value is rt or heat
-        else:
-            log.info('Temperature was not found for...')
 
 
     @staticmethod
@@ -225,8 +226,7 @@ class ConditionParser:
         if pressure:
             units = pressure.group(2) if pressure.group(2) else 'N/A'
             return {'Value': float(pressure.group(1)), 'Units': units}
-        else:
-            log.info('Pressure was not found for...')
+
 
     @staticmethod
     def _parse_yield(sentence):
@@ -245,8 +245,7 @@ class ConditionParser:
                 return {'Value': float(y.group(1)), 'Units': units}
             except ValueError:
                 return {'Value': y.group(1), 'Units': units}   # if value is 'gram scale'
-        else:
-            log.info('Yield was not found for...')
+
 
 
 def get_conditions(fig, arrow):
@@ -259,14 +258,18 @@ def get_conditions(fig, arrow):
     :param scan_steps:
     :return:
     """
-    textlines = find_step_conditions(fig, arrow)
-    recognised = [read_conditions(fig, line, conf_threshold=0.6) for line in textlines]
-    # print(f'recognised text: {recognised}')
-    spell_checked = [Correct(line).correct_text() for line in recognised if line]
-    parser = ConditionParser(spell_checked)
-    conditions_dct = parser.parse_conditions()
-    return Conditions(textlines, conditions_dct, arrow)
+    textlines, condition_structures = find_step_conditions(fig, arrow)
+    [setattr(panel, 'role', ReactionRoleEnum.CONDITIONS) for panel in condition_structures]
 
+    if textlines:
+        recognised = [read_conditions(fig, line, conf_threshold=0.6) for line in textlines]
+        # print(f'recognised text: {recognised}')
+        spell_checked = [Correct(line).correct_text() for line in recognised if line]
+        parser = ConditionParser(spell_checked)
+        conditions_dct = parser.parse_conditions()
+    else:
+        conditions_dct = {}
+    return Conditions(textlines, conditions_dct, arrow)
 
 # def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
 #     """
@@ -349,7 +352,7 @@ def get_conditions(fig, arrow):
 #         log.warning('No conditions were found in the initial scan. Aborting conditions search...')
 
 
-def find_step_conditions(fig:Figure, arrow:SolidArrow):
+def find_step_conditions(fig: Figure, arrow: SolidArrow):
     """
     Finds conditions of a step. Selects a region around an arrow. If the region contains text, scans the text.
     Otherwise it returns None (no conditions found).
@@ -358,12 +361,19 @@ def find_step_conditions(fig:Figure, arrow:SolidArrow):
     :param [Panel,...] panels: Collection of all connected components in ``fig.img``
     :return: Collection [Textline,...] containing characters grouped together as text lines
     """
+
+    structure_panels = [cc.parent_panel for cc in fig.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE
+                        and cc.parent_panel]
+    conditions_panels = [panel for panel in structure_panels if belongs_to_conditions(panel, arrow)]
+
+
     text_lines = mark_text_lines(fig, arrow)
-    if not text_lines:
-        return None
+    # if not text_lines:
+    #     return []
 
     for text_line in text_lines:
         collect_characters(fig, text_line)
+
 
     ##
     ##  temp
@@ -381,7 +391,7 @@ def find_step_conditions(fig:Figure, arrow:SolidArrow):
     # plt.show()
     ### end temp
 
-    return text_lines
+    return text_lines, conditions_panels
 
 ##
 ##  temp
@@ -396,6 +406,41 @@ def find_step_conditions(fig:Figure, arrow:SolidArrow):
 #                               facecolor='none', edgecolor=color)
 #         ax.add_patch(rect_bbox)
 # plt.show()
+
+
+def belongs_to_conditions(structure_panel, arrow):
+    """
+    Checks if a structure is part of the conditions
+
+    Looks if the ``structure_panel`` center lies close to a line parallel to arrow. Two points equidistant to the arrow
+    are chosen and the distance from these is compared to two extreme points of an arrow. If the centre is closer to
+    either of the two points (subject to a maximum threshold distance) than to either of the extremes,
+    the structure is deemed to be part of the conditions region
+
+    :param Panel structure_panel: Panel object marking a structure (superatoms included)
+    :param Arrow arrow: Arrow defining the conditions region
+    :return: bool True if within the conditions region else close
+    """
+
+    pixels = arrow.pixels
+    react_endpoint = pixels[0]
+    prod_endpoint = pixels[-1]
+    midpoint = pixels[len(pixels)//2]
+    parallel_line_dummy = Line([midpoint])
+
+    slope = arrow.line.slope
+    parallel_line_dummy.slope = -1/slope if abs(slope) > 0.05 else np.inf
+    parallel_1, parallel_2 = extend_line(parallel_line_dummy, extension=react_endpoint.separation(prod_endpoint) // 2)
+
+    closest = min([parallel_1, parallel_2, react_endpoint, prod_endpoint],
+                  key=lambda point: structure_panel.separation(point))
+
+    if closest in [parallel_1, parallel_2] and structure_panel.separation(closest) < 1.5 * np.sqrt(structure_panel.area):
+        return True
+    else:
+        return False
+
+
 def mark_text_lines(fig, arrow):
     """
     Isolates conditions around around ``arrow`` in ``fig``.
@@ -408,13 +453,15 @@ def mark_text_lines(fig, arrow):
 
     areas = [cc.area for cc in fig.connected_components]
     areas.sort()
+    condition1 = lambda cc: cc.role != FigureRoleEnum.STRUCTUREAUXILIARY
     if arrow.is_vertical:
-        condition = lambda cc: cc.top > arrow.top and cc.bottom < arrow.bottom
+        condition2 = lambda cc: cc.top > arrow.top and cc.bottom < arrow.bottom
     else:
-        condition = lambda cc: cc.left > arrow.left and cc.right < arrow.right
+        condition2 = lambda cc: cc.left > arrow.left and cc.right < arrow.right
 
+    condition = condition1 and condition2
     middle_pixel = arrow.center_px
-    distance_fn = lambda cc: 2* np.sqrt(cc.area)
+    distance_fn = lambda cc: 2.5 * cc.height
     core_ccs = find_nearby_ccs(middle_pixel, fig.connected_components, (3*average_height, distance_fn),
                                condition=condition)
     if not core_ccs:
@@ -425,7 +472,7 @@ def mark_text_lines(fig, arrow):
                 break
         else:
             log.warning('No conditions were found in the initial scan. Aborting conditions search...')
-            return None
+            return []
 
     # f = plt.figure()
     # ax = f.add_axes([0.1,0.1,0.8,0.8])
@@ -452,7 +499,7 @@ def mark_text_lines(fig, arrow):
 
     cropped_region = Crop(fig, conditions_region)
 
-    text_lines = [TextLine(None, None, top, bottom, cropped_region, anchor=anchor) for (top,bottom, anchor) in
+    text_lines = [TextLine(None, None, top, bottom, crop=cropped_region, anchor=anchor) for (top,bottom, anchor) in
                   identify_text_lines(cropped_region)]
 
     text_lines = [text_line.in_main_figure for text_line in text_lines]
@@ -473,7 +520,7 @@ def collect_characters(fig, text_line):
         raise ValueError('Character collection can only be performed in the main figure')
 
 
-    relevant_ccs = [cc for cc in fig.connected_components if cc.role != RoleEnum.ARROW]
+    relevant_ccs = [cc for cc in fig.connected_components if cc.role != FigureRoleEnum.ARROW]
     initial_distance = np.sqrt(np.mean([cc.area for cc in relevant_ccs]))
     distance_fn = lambda cc: 2 * np.max([cc.width, cc.height])
 
@@ -481,9 +528,8 @@ def collect_characters(fig, text_line):
     condition = lambda cc: (abs(text_line.panel.center[1] - cc.center[1]) < proximity_coeff(cc) * text_line.panel.height)\
                            and (cc.height < text_line.panel.height * 1.7)
     # first condition is cc.center in y direction close to center of text_line. Second is that height is comparable to text_line
-    print(f'anchor: {text_line.anchor}')
     text_line.connected_components = find_nearby_ccs(text_line.anchor, relevant_ccs,
-                                                     (initial_distance, distance_fn), RoleEnum.CONDITIONSCHAR, condition)
+                                                     (initial_distance, distance_fn), FigureRoleEnum.CONDITIONSCHAR, condition)
 
 # def scan_conditions_text2(conditions_crop, arrow):
 #     """
@@ -693,7 +739,7 @@ def collect_characters(fig, text_line):
 
 
 def identify_text_lines(crop):
-    ccs = [cc for cc in crop.connected_components if cc.role != RoleEnum.ARROW]  # filter out arrows
+    ccs = [cc for cc in crop.connected_components if cc.role != FigureRoleEnum.ARROW]  # filter out arrows
     ccs = [cc for cc in ccs if cc.area > np.percentile([cc.area for cc in ccs], 0.2)]   # filter out all small ccs (e.g. dots)
 
     img = crop.img

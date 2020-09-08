@@ -1,7 +1,6 @@
-from collections import namedtuple, Counter
-from functools import partial
+
 import copy
-from itertools import product, chain
+
 
 import logging
 import numpy as np
@@ -9,34 +8,40 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 from scipy.ndimage import label
-from scipy.signal import find_peaks
-from skimage.transform import probabilistic_hough_line, hough_line, hough_line_peaks
+from skimage.transform import probabilistic_hough_line
 from skimage.morphology import skeletonize as skeletonize_skimage
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import DBSCAN
 
-from config import get_area
+
 from models.arrows import SolidArrow
 from models.exceptions import NotAnArrowException, NoArrowsFoundException
-from models.reaction import ReactionStep, Conditions, Reactant, Product
-from models.segments import Rect, Panel, Figure, RoleEnum, Crop
+from models.reaction import ReactionStep, Conditions, ChemicalStructure
+from models.segments import Rect, Panel, Figure, FigureRoleEnum, ReactionRoleEnum
 from models.utils import Point, Line
 from utils.processing import approximate_line, pixel_ratio, binary_close, binary_floodfill, dilate_fragments
 from utils.processing import (binary_tag, get_bounding_box, erase_elements,
-                              is_slope_consistent, label_and_get_ccs, isolate_patches, is_a_single_line)
+                              isolate_patches, is_a_single_line, create_megabox)
 from ocr import read_character
+import settings
 
-log = logging.getLogger(__name__)
-log.setLevel('DEBUG')
+log = logging.getLogger('extract.actions')
 
-formatter = logging.Formatter('%(levelname)s:%(name)s: %(message)s')
-file_handler = logging.FileHandler('actions.log')
-file_handler.setFormatter(formatter)
+# formatter = logging.Formatter('%(levelname)s:%(name)s: %(message)s')
+# file_handler = logging.FileHandler('actions.log')
+# file_handler.setFormatter(formatter)
 
-stream_handler = logging.StreamHandler()
+# ch = logging.StreamHandler()
+# ch.setFormatter(formatter)
 
-log.addHandler(file_handler)
-log.addHandler(stream_handler)
+# log.addHandler(file_handler)
+# log.addHandler(ch)
+
+# create console handler and set level
+# level = 'DEBUG' if debug else 'INFO'
+# ch = logging.StreamHandler()
+# ch.setLevel(level)
+
 
 def segment(bin_fig, arrows):
     """
@@ -94,18 +99,40 @@ def segment(bin_fig, arrows):
     return set(panels)
 
 
-def choose_optimal_kernel_size(kernel_size, kernel_range):
+def find_optimal_dilation_ksize(fig=None):
     """
-    Given ``kernel_size``, adjusts it to a given range
-    :param int kernel_size: deduced kernel_size
-    :return: optimised kernel_size
+    Use structural backbones to calculate local skeletonised-pixel ratio and find optimal dilation kernel size for
+    structural segmentation.
+    :param Figure fig: Analysed Figure object containing marked structural backbones if its ``connected_components``
+    attribute
+    :return int: optimal kernel size
     """
-    kernel_range = list(kernel_range)
-    if kernel_size in kernel_range:
-        return kernel_size
-    else:
-        return kernel_range[0] if kernel_size < kernel_range[0] else kernel_range[-1]
+    if fig is None:
+        fig = settings.main_figure[0]
 
+    backbones = [cc for cc in fig.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
+
+    p_ratios = []
+    for backbone in backbones:
+        left, right, top, bottom = backbone
+        crop_rect = Rect(left-50, right+50, top-50, bottom+50)
+        p_ratio = skeletonize_area_ratio(fig, crop_rect)
+        log.debug(f'found in-crop skel_pixel ratio: {p_ratio}')
+
+        p_ratios.append(p_ratio)
+
+    kernel_size = 4
+    mean_p_ratio = np.mean(p_ratios)
+    if 0.016 < mean_p_ratio < 0.02:
+        kernel_size += 4
+    elif 0.01 < mean_p_ratio < 0.016:
+        kernel_size += 8
+    elif mean_p_ratio < 0.01:
+        kernel_size += 12
+    log.info('Structure segmentation kernel: %d' % kernel_size)
+
+    fig.kernel_size = kernel_size
+    return kernel_size
 
 
 def skeletonize(fig):
@@ -114,10 +141,10 @@ def skeletonize(fig):
     :param fig: analysed figure object
     :return: figure object with a skeletonised image
     """
-    fig = copy.deepcopy(fig)
-    fig.img = skeletonize_skimage(fig.img)
 
-    return fig
+    img = skeletonize_skimage(fig.img)
+
+    return Figure(img, raw_img=fig.raw_img)
 
 
 def skeletonize_area_ratio(fig, panel):
@@ -147,7 +174,7 @@ def find_arrows(fig, min_arrow_length):
         log.warning('No arrows have been found in the image')
         raise NoArrowsFoundException('No arrows have been found')
 
-    return arrows
+    return list(set(arrows))
 
 
 def find_solid_arrows(fig, threshold, min_arrow_length):
@@ -206,7 +233,7 @@ def find_solid_arrows(fig, threshold, min_arrow_length):
         else:
             arrows.append(new_arrow)
             parent_cc = [cc for cc in fig.connected_components if cc == new_arrow.panel][0]
-            parent_cc.role = RoleEnum.ARROW
+            parent_cc.role = FigureRoleEnum.ARROW
     # lines = probabilistic_hough_line(skeleton, threshold=threshold, line_length=min_arrow_length)
     #print(lines)
     # labelled_img, _ = label(img)
@@ -253,333 +280,174 @@ def find_solid_arrows(fig, threshold, min_arrow_length):
     return list(set(arrows))
 
 
-def contextualize_species(fig: Figure, all_conditions: Conditions):
+def complete_structures(fig: Figure):
     """
-    Finds all reactants and products for each reaction step in a figure. Uses the found backbones to detect chemical
-    structures (backbones + lone bond ccs + superatoms) and looks for reactants and products at each reaction step
-    (around each arrow found in conditions).
+    Dilates a figure and uses structural backbones to find complete structures (backbones + superatoms etc.).
+
+    Dilates a figure using a pre-derived dilation kernel. Checks which ccs correspond to backbones in the dilated figure.
+    Assuming that this cc is the full (dilated) structure, compares it will all initial overlapping ccs to find original
+    full structure in an image. Also assigns roles of all the smaller constituent ccs.
     :param Figure fig: analysed figure
-    :param [Conditions,...] all_conditions: collection of all found Conditions (each contains an ``arrow``)
     :return: [ReactionStep,...] collection of ReactionStep objects
     """
 
-    backbones = [cc for cc in fig.connected_components if cc.role == RoleEnum.STRUCTUREBACKBONE]
+    backbones = [cc for cc in fig.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
+    dilated_structure_panels, dilated_other = dilate_group_panels(fig, backbones)
 
-    structure_panels = assign_backbone_auxiliaries(fig, backbones)  # This also assigns ``role`` of each auxiliary
+    structure_panels = _complete_structures(fig, dilated_structure_panels)
+    _assign_backbone_auxiliaries(fig, (dilated_structure_panels, dilated_other), structure_panels)  # Assigns cc roles
 
-    return [scan_reaction_step(conditions, structure_panels) for conditions in all_conditions]
+    return structure_panels
 
 
-def scan_reaction_step(conditions, structure_ccs):
+def dilate_group_panels(fig, backbones):
+    """
+    Dilates ``fig`` and separates found connected components into dilated structures and other non-structural ccs.
+    The separation is done on the basis of comparison with original backbones.
+    :param Figure fig: Analysed figure
+    :param [Panel,...] backbones: Collection of panels containing structural backbones
+    :return: (dilated_structure_panels, non_structures) pair of collections containing the separated ccs
+    """
+
+    dilated = dilate_fragments(fig, fig.kernel_size)
+
+    dilated_structure_panels = []
+    non_structures = []
+    for cc in dilated.connected_components:
+        if any(cc.contains(backbone) for backbone in backbones):
+            dilated_structure_panels.append(cc)
+        else:
+            non_structures.append(cc)
+
+    return dilated_structure_panels, non_structures
+
+
+def scan_form_reaction_step(conditions, structure_ccs):
     """
     Scans an image around a single arrow to give reactants and products in a single reaction step
     :param Conditions conditions: Conditions object containing ``arrow`` around which the scan is performed
     :param [Panel,...] structure_ccs: collection of all detected structures
     :return: a ReactionStep object
     """
-    left_endpoint, right_endpoint = extend_line(conditions.arrow.line)
-    initial_distance = np.sqrt(np.mean([cc.area for cc in structure_ccs]))
-    reactants = find_nearby_ccs(left_endpoint,structure_ccs, (initial_distance, lambda cc: 1.5*np.sqrt(cc.area)))
-    reactants = [Reactant(reactant) for reactant in reactants]
+    arrow = conditions.arrow
+    endpoint1, endpoint2 = extend_line(conditions.arrow.line, extension=arrow.pixels[0].separation(arrow.pixels[-1]))
+    react_side_point = conditions.arrow.react_side[0]
+    endpoint1_close_to_react_side = endpoint1.separation(react_side_point) < endpoint2.separation(react_side_point)
+    if endpoint1_close_to_react_side:
+        react_endpoint, prod_endpoint = endpoint1, endpoint2
+    else:
+        react_endpoint, prod_endpoint = endpoint2, endpoint1
 
-    products = find_nearby_ccs(right_endpoint, structure_ccs, (initial_distance, lambda cc: 1.5*np.sqrt(cc.area)))
-    products = [Product(product) for product in products]
+    initial_distance = 1.25 * np.sqrt(np.mean([cc.area for cc in structure_ccs]))
+    reactants = find_nearby_ccs(react_endpoint, structure_ccs, (initial_distance, lambda cc: 1.5*np.sqrt(cc.area)))
+    reactants = [ChemicalStructure(reactant) for reactant in reactants]
+
+    products = find_nearby_ccs(prod_endpoint, structure_ccs, (initial_distance, lambda cc: 1.5*np.sqrt(cc.area)))
+    products = [ChemicalStructure(product) for product in products]
     return ReactionStep(reactants, products, conditions=conditions)
 
 
-def assign_backbone_auxiliaries(fig, backbones):
+def _complete_structures(fig, dilated_structure_panels):
     """
-    For each of the ``backbones`` assign all relevant auxiliary connected components in ``fig`` (superatoms and
-    lone-bond ccs) to give complete chemical structures. This function returns the structures AND modifies roles of
+    Dilates structural backbones to find full structures (backbones + superatoms + multiple/hashed bonds).
+
+    For each of the ``backbones`` assign all relevant auxiliary connected components in ``fig``
+    to give complete chemical structures. This function returns the structures AND modifies roles of
     the auxiliary connected components.
     :param Figure fig: Analysed figure
-    :param [Panel,...] backbones: collection of detected structural backbones
     :return: collection of Panels delineating complete chemical structures
     """
-    #Check for a sample distance between a structure and a superatom label (first non-negative distance adjusted
-    #                                                                       for the size of both connected components)
-    # Use this distance to find the dilation (expansion) kernel size
-    adjusted_distance = lambda self, other: self.separation(other) - 0.5*np.sqrt(self.area) - 0.5*np.sqrt(other.area)
-    largest = max(backbones, key= lambda cc: cc.area)
-    sample_distances = sorted([adjusted_distance(largest, cc) for cc in fig.connected_components])
 
-    kernel_size = int([distance for distance in sample_distances if distance > 0][0])
-    kernel_size = choose_optimal_kernel_size(kernel_size, range(4, 7))
-    print(f'established kernel size: {kernel_size}')
-    dilated = dilate_fragments(fig, kernel_size)
-    # closed = binary_close(fig, kernel_size+5)
-    # closed = Figure(closed.img)
-
-
-    #Look for the dilated structures by comparing with the original backbone ccs. Set aside structures that fully
+    # Look for the dilated structures by comparing with the original backbone ccs. Set aside structures that fully
     # overlap with small ccs (e.g. labels), but have not been connected by the dilation. (ambiguous)
     # Use the rest of structures to assign roles of smaller ccs directly (resolved). In the case of ambiguous
     # structures, carefully compare ccs so as to leave the disconnected entity intact.
-    # TODO: Currently the dilation is two-fold. Make it all one go, refactor into a new function or otherwise improve?
-    # TODO: Same for structure search - does it have to be this way?
-    structure_panels =[]
-    non_structures = []
-    for cc in dilated.connected_components:
-        if any(cc.contains(backbone) for backbone in backbones):
-            structure_panels.append(cc)
-        else:
-            non_structures.append(cc)
 
-    p_ratios = []
-    for structure in structure_panels:
-        left, right, top, bottom = structure
-        crop_rect = Rect(left-50, right+50, top-50, bottom+50)
-        p_ratio = skeletonize_area_ratio(fig, crop_rect)
-        print(f'found skel_pixel ratio: {p_ratio}')
-        p_ratios.append(p_ratio)
-    print('----')
-    if all(p_ratio < 0.02 for p_ratio in p_ratios):
-        print('dilating further!')
-        dilated = dilate_fragments(dilated, 4)
 
-    structure_panels =[]
-    non_structures = []
-    for cc in dilated.connected_components:
-        if any(cc.contains(backbone) for backbone in backbones):
-            structure_panels.append(cc)
-        else:
-            non_structures.append(cc)
+    structure_panels = []
+    for dilated_structure in dilated_structure_panels:
+        constituent_ccs = [cc for cc in fig.connected_components if dilated_structure.contains(cc)]
+        parent_structure_panel = create_megabox(constituent_ccs)
+        structure_panels.append(parent_structure_panel)
+        backbone = [cc for cc in constituent_ccs if cc.role == FigureRoleEnum.STRUCTUREBACKBONE][0]
+        setattr(backbone, 'parent_panel', parent_structure_panel)
+
+
+
+    # f = plt.figure()
+    # ax = f.add_axes([0,0,1,1])
+    # ax.imshow(fig.img)
+    # for panel in structure_panels:
+    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
+    #     ax.add_patch(rect_bbox)
+    # plt.show()
+    #
+    # f = plt.figure()
+    # ax = f.add_axes([0,0,1,1])
+    # ax.imshow(dilated.img)
+    # for panel in structure_panels:
+    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
+    #     ax.add_patch(rect_bbox)
+    # plt.show()
+    return structure_panels
+
+
+def _assign_backbone_auxiliaries(fig, dilated_panels, structure_panels):
+    """
+    Takes in the ``structure_panels`` to assign roles to structural auxiliaries (solitary
+    bondlines, superatom labels) found in ``figure`` based on comparison between each structure panel and its
+    corresponding backbone in ``figure``.
+    :param Figure fig: analysed figure
+    :param tuple(dilated_structures, dilated,non_structures) dilated_panels: pair containing dilated ccs classified into
+    the two groups
+    :return: None (mutates ''role'' attribute of each relevant connected component)
+    """
+    #TODO: Simplify/combine loops where appropriate to speed this up.
+    dilated_structure_panels, non_structures = dilated_panels
+    parent_panel_pairs = [(parent, dilated) for parent in structure_panels for dilated in dilated_structure_panels if
+                          dilated.contains(parent)]
+
 
     resolved = []
     ambiguous = []
-    for structure in structure_panels:
-        overlapping = [cc for cc in non_structures if structure.contains(cc)]
-        if overlapping:
-            ambiguous.append((structure, overlapping))
+    for structure in dilated_structure_panels:
+        disconnected_overlapping_ccs = [cc for cc in non_structures if structure.overlaps(cc)]
+        if disconnected_overlapping_ccs:
+            ambiguous.append((structure, disconnected_overlapping_ccs))
         else:
             resolved.append(structure)
+    log.debug('Found %d resolved and %d ambiguous structures.' % (len(resolved), len(ambiguous)))
     # resolved = [structure for structure in dilated_structures if not any(structure.contains(cc)
     #                                                                      for cc in dilated.connected_components)]
     # ambiguous_structures = [(structure, [cc for cc in dilated.connected_components if structure.contains(cc)])
     #                          for structure in dilated_structures]
 
-    [[setattr(auxiliary, 'role', RoleEnum.STRUCTUREAUXILIARY) for auxiliary in fig.connected_components if
-      resolved_structure.contains(auxiliary) and getattr(auxiliary, 'role') != RoleEnum.STRUCTUREBACKBONE]
-     for resolved_structure in resolved]
+    # [[setattr(auxiliary, 'role', FigureRoleEnum.STRUCTUREAUXILIARY) for auxiliary in fig.connected_components if
+    #   resolved_structure.contains(auxiliary) and getattr(auxiliary, 'role') != FigureRoleEnum.STRUCTUREBACKBONE]
+    #  for resolved_structure in resolved]
 
-    for cc in fig.connected_components:
-        for structure, overlapping_ccs in ambiguous:
-            if structure.contains(cc) and not any(overlapping.contains(cc) for overlapping in overlapping_ccs):
-                setattr(cc, 'role', RoleEnum.STRUCTUREAUXILIARY)
+    for structure in resolved:
+        for cc in fig.connected_components:
+            if cc.role != FigureRoleEnum.STRUCTUREBACKBONE and structure.contains(cc):
+                setattr(cc, 'role', FigureRoleEnum.STRUCTUREAUXILIARY)
+                parent_panel = [parent for parent, dilated in parent_panel_pairs if dilated == structure][0]
+                setattr(cc, 'parent_panel', parent_panel)
 
-    f = plt.figure()
-    ax = f.add_axes([0,0,1,1])
-    ax.imshow(fig.img)
-    for panel in structure_panels:
-        rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
-        ax.add_patch(rect_bbox)
-    plt.show()
+    for structure, disconnected_overlapping_ccs in ambiguous:
+        for cc in fig.connected_components:
+            if cc.role != FigureRoleEnum.STRUCTUREBACKBONE:
+                condition_1 = structure.contains(cc)
+                condition_2 = lambda overlapping_cc: overlapping_cc.contains(cc)
 
-    f = plt.figure()
-    ax = f.add_axes([0,0,1,1])
-    ax.imshow(dilated.img)
-    for panel in structure_panels:
-        rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
-        ax.add_patch(rect_bbox)
-    plt.show()
+                if condition_1 and not (
+                any(condition_2(overlapping_cc) for overlapping_cc in disconnected_overlapping_ccs)):
+                    # include cc that are contained within structure and are either very small (parts of hashed bonds)
+                    # or are glued to the structure in the dilated image
+                    setattr(cc, 'role', FigureRoleEnum.STRUCTUREAUXILIARY)
+                    parent_panel = [parent for parent, dilated in parent_panel_pairs if dilated == structure][0]
+                    setattr(cc, 'parent_panel', parent_panel)
 
-
-
-
-    return structure_panels
-
-
-# def scan_all_reaction_steps(fig, all_arrows, all_conditions, panels,global_skel_pixel_ratio, stepsize=30):
-#     """
-#     Main subroutine for reaction step scanning
-#     :param Figure fig: Figure object being processed
-#     :param iterable all_arrows: List of all found arrows
-#     :param iterable panels: List of all connected components
-#     :param float global_skel_pixel_ratio: a float describing density of on-pixels
-#     :param int stepsize: size of a step in the line scanning subroutine
-#     :return iterable: List of ReactionStep objects containing assigned connected components
-#     """
-#     steps =[]
-#     fig = copy.deepcopy(fig)
-#
-#     closed_panels = segment(fig, all_arrows)
-#
-#     structure_backbones = detect_structures(fig, label_and_get_ccs(fig))
-#     structures = [panel for panel in closed_panels if
-#                   any(panel.overlaps(backbone) and panel.area >= backbone.area for backbone in structure_backbones)]
-#     # f, ax = plt.subplots()
-#     # ax.imshow(fig.img)
-#     # for panel in structures:
-#     #     offset=0
-#     #     rect_bbox = Rectangle((panel.left+offset, panel.top+offset),
-#     #     panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
-#     #     ax.add_patch(rect_bbox)
-#     # plt.show()
-#
-#
-#     # fig_structures = isolate_patches(fig, structures)
-#     # plt.imshow(fig_structures.img)
-#     # plt.title('structures isolated')
-#     # plt.show()
-#     # f, ax = plt.subplots()
-#     # ax.imshow(fig.img)
-#     # for panel in closed_panels:
-#     #     offset=0
-#     #     rect_bbox = Rectangle((panel.left+offset, panel.top+offset),
-#     #     panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='m')
-#     #     ax.add_patch(rect_bbox)
-#     # plt.show()
-#     for idx, arrow in enumerate(all_arrows):
-#         ccs_reacts_prods = find_step_reactants_and_products(fig, all_conditions[idx], arrow, all_arrows, structures)
-#
-#         panels_dict = assign_to_nearest(structures, ccs_reacts_prods['reactants'], ccs_reacts_prods['products'])
-#         # panels_dict = ccs_reacts_prods
-#         first_step_flag = ccs_reacts_prods['first step']
-#         reacts = panels_dict['reactants']
-#         prods = panels_dict['products']
-#         # print(f'panels_dict: {panels_dict}')
-#         # if global_skel_pixel_ratio > 0.02 : #Original kernel size < 6
-#         #     reacts = postprocessing_close_merge(fig, reacts)
-#         #     prods = postprocessing_close_merge(fig, prods)
-#         #     log.debug('Postprocessing closing and merging finished.')
-#
-#         reacts = [Reactant(connected_components=react) for react in reacts]
-#         prods = [Product(connected_components=prod) for prod in prods]
-#         steps.append(ReactionStep(arrow, reacts, prods, all_conditions[idx], first_step_flag))
-#         # print('panels:', panels)
-#     # if control_set != panels:
-#     #     log.warning('Some connected components remain unassigned following scan_all_reaction_steps.')
-#     # else:
-#     #     log.info('All connected components have been assigned following scan_all_reaction steps.')
-#     return steps
-
-
-# def find_step_reactants_and_products(fig, step_conditions, step_arrow, all_arrows, structures, stepsize=30):
-#     """
-#     :param Figure fig: figure object being processed
-#     :param Conditions step_conditions: an object containing `text_lines` representing conditions connected components
-#     :param Arrow step_arrow: Arrow object connecting the reactants and products
-#     :param iterable all_arrows: a list of all arrows found
-#     :param iterable structures: detected structures
-#     :return: a list of all conditions bounding boxes ##
-#     """
-#     log.info('Looking for reactants and products around arrow %s', step_arrow)
-#     first_step = False
-#     megabox_ccs = copy.deepcopy(step_conditions.text_lines) if isinstance(step_conditions, Conditions) else []
-#     megabox_ccs.append(step_arrow)
-#     megabox = create_megabox(megabox_ccs)
-#     top_left = Point(row=megabox.top, col=megabox.left)
-#     bottom_left = Point(row=megabox.bottom, col=megabox.left)
-#     top_right = Point(row=megabox.top, col=megabox.right)
-#     bottom_right = Point(row=megabox.bottom, col=megabox.right)
-#     # TODO: Decide how to treat the special case of horizontal arrows
-#     # where we need to form lines differently
-#     # print('top left, bottom left:')
-#     # print(top_left.row, top_left.col)
-#     # print(bottom_left.row, bottom_left.col)
-#     left_edge = approximate_line(top_left, bottom_left)
-#     # print(left_edge.pixels)
-#     right_edge = approximate_line(top_right, bottom_right)
-#     arrow_react_midpoint = Point(*np.mean(step_arrow.react_side, axis=0))
-#     arrow_prod_midpoint = Point(*np.mean(step_arrow.prod_side, axis=0))
-#
-#     dist_left_edge_react_midpoint = left_edge.distance_from_point(arrow_react_midpoint)
-#     dist_left_edge_prod_midpoint = left_edge.distance_from_point(arrow_prod_midpoint)
-#     react_scanning_line = left_edge if dist_left_edge_react_midpoint < dist_left_edge_prod_midpoint else right_edge
-#     prod_scanning_line = right_edge if react_scanning_line is left_edge else left_edge
-#     if react_scanning_line is left_edge:
-#         log.debug('Reactant scanning line is the left edge, product scanning line is the right edge')
-#     else:
-#         log.debug('Reactant scanning line is the right edge, product scanning line is the left edge')
-#
-#     if react_scanning_line is left_edge:
-#         #Set these to assign direction of expansion for the lines
-#         react_increment = -1
-#         prod_increment = 1
-#     else:
-#         react_increment = 1
-#         prod_increment = -1
-#
-#     raw_reacts = set()
-#     raw_prods = set()
-#
-#     # Find reactants
-#     p1_react = react_scanning_line.pixels[0]
-#     p2_react = react_scanning_line.pixels[-1]
-#     p1_react_scancol = p1_react.col
-#     p2_react_scancol = p2_react.col
-#     i = 0 # for debugging only
-#     all_point_pairs_react = []
-#     for step in range(fig.img.shape[1]//stepsize):
-#         p1_react_scancol += stepsize*react_increment
-#         p2_react_scancol += stepsize*react_increment
-#         cond1 = p1_react_scancol < 0 or p2_react_scancol < 0
-#         cond2 = p1_react_scancol > fig.img.shape[1] or p2_react_scancol > fig.img.shape[1]
-#         if cond1 or cond2:
-#             break
-#         line = approximate_line(Point(row=p1_react.row, col=p1_react_scancol),
-#                                 Point(row=p2_react.row, col=p2_react_scancol))
-#         case_study_plot_pairs = [(p1_react_scancol, p1_react.row), (p2_react_scancol, p2_react.row)]
-#         all_point_pairs_react.append(case_study_plot_pairs)
-#         if any(arrow.overlaps(line) for arrow in all_arrows):
-#             log.debug('While scanning reactants, an arrow was encountered - breaking from the loop')
-#
-#             log.debug('breaking at iteration %s'% i)
-#             break
-#         raw_reacts.update([structure for structure in structures if structure
-#                           .overlaps(line)])
-#     else:
-#         first_step = True
-#     log.info('Found the following connected components of reactants: %s' % raw_reacts)
-#
-#
-#     # Find products
-#     raw_prods = set()
-#     p1_prod = prod_scanning_line.pixels[0]
-#     p2_prod = prod_scanning_line.pixels[-1]
-#     p1_prod_scancol = p1_prod.col
-#     p2_prod_scancol = p2_prod.col
-#     #Need to access figure dimensions here
-#     i=0 # for debugging only
-#     all_point_pairs_prod = []
-#     for step in range(fig.img.shape[1]//stepsize):
-#         p1_prod_scancol += stepsize*prod_increment
-#         p2_prod_scancol += stepsize*prod_increment
-#         cond1 = p1_prod_scancol < 0 or p2_prod_scancol < 0
-#         cond2 = p1_prod_scancol > fig.img.shape[1] or p2_prod_scancol > fig.img.shape[1]
-#         if cond1 or cond2:
-#             break
-#         line = approximate_line(Point(row=p1_prod.row, col=p1_prod_scancol),
-#                                 Point(row=p2_prod.row, col=p2_prod_scancol))
-#         case_study_plot_pairs = [(p1_prod_scancol, p1_prod.row), (p2_prod_scancol, p2_prod.row)]
-#         all_point_pairs_prod.append(case_study_plot_pairs)
-#
-#         if any(arrow.overlaps(line) for arrow in all_arrows):
-#             log.debug('While scanning products, an arrow was encountered - breaking from the loop')
-#             log.debug('breaking prod at iteration  %s' % i)
-#             break
-#         raw_prods.update([structure for structure in structures if structure.overlaps(line)])
-#     log.info('Found the following connected components of prods: %s ' % raw_prods)
-#
-#
-#     f = plt.figure(figsize=(20,20))
-#     ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
-#     ax.imshow(fig.img, cmap=plt.cm.binary)
-#     for line in all_point_pairs_react:
-#         x, y = list(zip(*line))
-#         ax.plot(x, y, 'r')
-#
-#     for line in all_point_pairs_prod:
-#         x, y = list(zip(*line))
-#         ax.plot(x, y, 'b')
-#
-#     plt.savefig('roles.tif')
-#
-#     plt.show()
-#
-#     return {'reactants':raw_reacts, 'products':raw_prods, 'first step': first_step}
-
-
+    log.info('Roles of structure auxiliaries have been assigned.')
 # def find_step_reactants_and_products(fig, step_arrow, all_arrows, structures):
 #     """
 #     Finds reactants and products from ``structures`` of a single reaction step (around a single arrow) using
@@ -594,35 +462,35 @@ def assign_backbone_auxiliaries(fig, backbones):
 
 
 
-def assign_to_nearest(structures, reactants, products, threshold=None):
-    """
-    This postrocessing function takes in unassigned structures and classified panels to perform a set difference.
-    It then assings the structures to the appropriate group based on the closest neighbour, subject to a threshold.
-    :param iterable structures: list of all detected structured
-    :param int threshold: maximum distance from nearest neighbour # Not used at this stage. Is it necessary?
-    # :param iterable conditions: List of conditions' panels of a reaction step # not used
-    :param iterable reactants: List of reactants' panels of a reaction step
-    :param iterable products: List of products' panels of a reaction step
-    :return dictionary: The modified groups
-    """
-
-    log.debug('Assigning connected components based on distance')
-    #print('assign: conditions set: ', conditions)
-    classified_structures = [*reactants, *products]
-    #print('diagonal lengths: ')
-    #print([cc.diagonal_length for cc in classified_ccs])
-    threshold =  0.5 * np.mean(([cc.diagonal_length for cc in classified_structures]))
-    unclassified =  [structure for structure in structures if structure not in classified_structures]
-    for cc in unclassified:
-        classified_structures.sort(key=lambda elem: elem.separation(cc))
-        nearest = classified_structures[0]
-        groups = [reactants, products]
-        for group in groups:
-            if nearest in group and nearest.separation(cc) < threshold:
-                group.add(cc)
-                log.info('assigning %s to group %s based on distance' % (cc, group))
-
-    return {'reactants':reactants, 'products':products}
+# def assign_to_nearest(structures, reactants, products, threshold=None):
+#     """
+#     This postrocessing function takes in unassigned structures and classified panels to perform a set difference.
+#     It then assings the structures to the appropriate group based on the closest neighbour, subject to a threshold.
+#     :param iterable structures: list of all detected structured
+#     :param int threshold: maximum distance from nearest neighbour # Not used at this stage. Is it necessary?
+#     # :param iterable conditions: List of conditions' panels of a reaction step # not used
+#     :param iterable reactants: List of reactants' panels of a reaction step
+#     :param iterable products: List of products' panels of a reaction step
+#     :return dictionary: The modified groups
+#     """
+#
+#     log.debug('Assigning connected components based on distance')
+#     #print('assign: conditions set: ', conditions)
+#     classified_structures = [*reactants, *products]
+#     #print('diagonal lengths: ')
+#     #print([cc.diagonal_length for cc in classified_ccs])
+#     threshold =  0.5 * np.mean(([cc.diagonal_length for cc in classified_structures]))
+#     unclassified =  [structure for structure in structures if structure not in classified_structures]
+#     for cc in unclassified:
+#         classified_structures.sort(key=lambda elem: elem.separation(cc))
+#         nearest = classified_structures[0]
+#         groups = [reactants, products]
+#         for group in groups:
+#             if nearest in group and nearest.separation(cc) < threshold:
+#                 group.add(cc)
+#                 log.info('assigning %s to group %s based on distance' % (cc, group))
+#
+#     return {'reactants':reactants, 'products':products}
 
 
 def remove_redundant_characters(fig, ccs, chars_to_remove=None):
@@ -639,16 +507,7 @@ def remove_redundant_characters(fig, ccs, chars_to_remove=None):
     if chars_to_remove is None:
         chars_to_remove = '+[]'
 
-    closed = binary_close(fig, size=3)
-    closed_ccs = label_and_get_ccs(closed)
-    ccs_to_consider = set(ccs).intersection(set(closed_ccs))
-    f, ax = plt.subplots()
-    ax.imshow(closed.img)
-    for panel in ccs_to_consider:
-        rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',
-                              edgecolor='r')
-        ax.add_patch(rect_bbox)
-    plt.show()
+    ccs_to_consider = [cc for cc in fig.connected_components if not cc.role]
 
     diags_to_erase = []
     for cc in ccs_to_consider:
@@ -656,7 +515,7 @@ def remove_redundant_characters(fig, ccs, chars_to_remove=None):
 
         if text_word:
             text = text_word.text
-            print(f'recognised char: {text}')
+            # print(f'recognised char: {text}')
 
             if any(redundant_char is text for redundant_char in chars_to_remove):
                 diags_to_erase.append(cc)
@@ -696,39 +555,6 @@ def remove_redundant_square_brackets(fig, ccs):
     return fig
 
 
-def match_function_and_smiles(reaction_step, smiles):
-    """
-    Matches the resolved smiles from chemschematicresolver to functions (reactant, product) found by the segmentation
-    algorithm.
-
-    :param ReactionStep reaction_step: object containing connected components classified as `reactants` or `products`
-    :param [[smile], [ccs]l] smiles: list of lists containing structures converted into SMILES format and recognised
-     labels, and connected components depicting the structures in an image
-    :return: Mutated ReactionStep object - with optically recognised structures as SMILES and labels/auxiliary text
-    """
-
-    for reactant in reaction_step.reactants:
-        matching_record = [recognised for recognised, diag in zip(*smiles) if diag == reactant.connected_component]
-        # This __eq__ is based on a flaw in csr - cc is of type `Label`, but inherits from Rect
-        if matching_record:
-            matching_record = matching_record[0]
-            reactant.label = matching_record[0]
-            reactant.smiles = matching_record[1]
-        else:
-            log.warning('No SMILES match was found for a reactant structure')
-
-    for product in reaction_step.products:
-
-        matching_record = [recognised for recognised, diag in zip(*smiles) if diag == product.connected_component]
-        # This __eq__ is based on flaw in csr - cc is of type `Diagram`, but inherits from Rect
-        if matching_record:
-            matching_record = matching_record[0]
-            product.label = matching_record[0]
-            product.smiles = matching_record[1]
-        else:
-            log.warning('No SMILES match was found for a product structure')
-
-
 def detect_structures(fig ):
     """
     Detects structures based on parameters such as size, aspect ratio and number of detected lines
@@ -748,28 +574,22 @@ def detect_structures(fig ):
     num_lines = [(length, len(probabilistic_hough_line(estimation_fig.img, line_length=int(length), threshold=15))**2)
                     for length in min_line_lengths]
     # Choose the value where the number of lines starts to drop most rapidly and assign it as the boundary length
-    (boundary_length,_), (_, _) = min(zip(num_lines, num_lines[1:]), key= lambda pair: pair[1][1] - pair[0][1])  # the key is
+    (boundary_length,_), (_, _) = min(zip(num_lines, num_lines[1:]), key=lambda pair: pair[1][1] - pair[0][1])  # the key is
                                                                         # difference in number of detected lines
                                                                         # between adjacent pairs
     boundary_length = int(boundary_length)
     fig.boundary_length = boundary_length  # global estimation parameter
     # Use the length to find number of lines in each cc - this will be one of the used features
     cc_lines = []
-    # all_lines = [] #Case study only
     for cc in ccs:
         isolated_cc_fig = isolate_patches(fig, [cc])
         isolated_cc_fig = skeletonize(isolated_cc_fig)
-        # lines = probabilistic_hough_line(isolated_cc_fig.img, line_length=boundary_length, threshold=15)  # Case study
-        # all_lines.extend(lines)  # case study
-        # hspace, angles, dists = hough_line(isolated_cc_fig.img)
-        # hspace, angles, dists = hough_line_peaks(hspace, angles, dists, threshold=boundary_length)
-        # num_lines = len(dists)
-        # print(f'num lines normal: {len(dists)}')
-        angles = np.linspace(-np.pi, np.pi, 360)
+
+        # angles = np.linspace(-np.pi, np.pi, 360)
         num_lines = len(probabilistic_hough_line(isolated_cc_fig.img,
-                                                 line_length=boundary_length, threshold=10, theta=angles))
-        # print(f'num lines prob: {num_lines}')
+                                                 line_length=boundary_length, threshold=10))
         cc_lines.append(num_lines)
+
 
     ##Case study only
     # skeleton_fig = skeletonize(fig)
@@ -845,7 +665,7 @@ def detect_structures(fig ):
     #     #plt.savefig('backbones.tif')
     #     plt.show()
     structures = [panel for panel, label in paired if label == -1]
-    [setattr(structure, 'role', RoleEnum.STRUCTUREBACKBONE) for structure in structures]
+    [setattr(structure, 'role', FigureRoleEnum.STRUCTUREBACKBONE) for structure in structures]
 
     return structures
 
@@ -903,9 +723,6 @@ def detect_structures(fig ):
     # return ccs, labels
 
 
-
-
-
 def extend_line(line, extension=None):
     """
     Extends line in both directions. Output is a pair of points, each of which is further from an arrow (closer to
@@ -956,10 +773,11 @@ def find_nearby_ccs(start, all_relevant_ccs, distances, role=None, condition=(la
     checked again to form a cluster of nearby structures.
     :param Point or (x,y) start: point where the search starts
     :param [Panel,...] all_relevant_ccs: list of all found structures
-    :param type role: class specifying role of the ccs in the scheme (e.g. Reactant, Conditions)
-    :param (float, function) distances: a tuple (maximum_initial_distance, distance_function) which specifies allowed
+    :param type role: class specifying role of the ccs in the scheme (e.g. ChemicalStructure, Conditions)
+    :param (float, lambda) distances: a tuple (maximum_initial_distance, distance_function) which specifies allowed
     distance from the starting point and a function defining cut-off distance for subsequent reference ccs
-    :param bool condition: optional condition to decide whether a connected component should be added to the frontier or not
+    :param lambda condition: optional condition to decide whether a connected component should be added to the frontier
+                                                                                                                or not.
     :return: List of all nearby structures
     """
     max_initial_distance, distance_fn = distances
@@ -985,3 +803,30 @@ def find_nearby_ccs(start, all_relevant_ccs, distances, role=None, condition=(la
     return found_ccs
 
 
+def get_conditions_smiles(csr_output, conditions):
+    """
+    Appends structures found in the conditions region and transformed into smiles in ``cst_output`` to ``conditions``.
+
+    :param (recognised, diagrams) csr_output: tuple containing a (recognised_structures, diagrams) pair of sequences
+    :param [Conditions,...]  conditions: list of all Conditions object in an image
+    """
+    fig = settings.main_figure[0]
+    conditions_structures = set([cc.parent_panel for cc in fig.connected_components if cc.parent_panel
+                                 and cc.parent_panel.role == ReactionRoleEnum.CONDITIONS])
+
+    if not conditions_structures:
+        log.debug('Conditions remain unchanged after matching conditions smiles.')
+        return conditions
+
+    recognised, diagrams = csr_output
+    for structure in conditions_structures:
+        for idx, diag in enumerate(diagrams):
+            if structure == Panel(diag.left, diag.right, diag.top, diag.bottom):
+                label, smiles = recognised[idx]
+                log.info('SMILES string was matched to a structure in the conditions region')
+
+                closest_step_conditions = min(conditions, key=lambda step_conditions:
+                                              structure.separation(step_conditions.anchor))
+                closest_step_conditions.conditions_dct['other species'].append(smiles)
+
+    return conditions

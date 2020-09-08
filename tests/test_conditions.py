@@ -5,7 +5,7 @@ import os
 from chemdataextractor.doc.text import Sentence, Span
 from conditions import ConditionParser, mark_conditions_region
 from actions import find_solid_arrows,erase_elements
-from utils.io import imread
+from utils.io_ import imread
 from models.segments import Crop, Rect
 
 SENTENCES = [Sentence(text='LiOH (3 equiv.)'), Sentence(text='KMnO3 (1.5 equivalents'), Sentence(text='MnO2 (0.5 mol%'),

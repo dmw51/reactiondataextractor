@@ -18,27 +18,34 @@ author: Matthew Swain
 email: m.swain@me.com
 
 """
+
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
+
+from collections.abc import Collection
 from enum import Enum
 import logging
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+
 #Remove Python2 compatibility?
 #from . import decorators
 from itertools import product
 import numpy as np
 import scipy.ndimage as ndi
 from skimage.measure import regionprops
+from skimage.color import rgb2gray
 from models.utils import Line, Point
-from models.exceptions import AnchorNotFoundException
-# from utils.processing import create_megabox # can't do - circular, to fix.
+import settings
 
 
 
 log = logging.getLogger(__name__)
 
-class RoleEnum(Enum):
+class FigureRoleEnum(Enum):
     """
     Enum used to mark connected components in a figure. Each connected component is assigned a role in a form of an
     enum member to facilitate segmentation.
@@ -50,13 +57,29 @@ class RoleEnum(Enum):
     STRUCTUREBACKBONE = 5
     STRUCTUREAUXILIARY = 6   # Either a solitary bond-line (e.g. double bond) ar a superatom label
     BONDLINE = 7
+    OTHER = 8
+
+
+class ReactionRoleEnum(Enum):
+    """
+    Enum used to mark panels (sometimes composed from a set of dilated connected components) in a figure.
+
+    Original ccs are well described using the above ``FigureRoleEnum`` and hence this enum is only used for panels in
+    dilated figure - in particular, to describe which structures are reactants and products, and which form part of the
+    conditions region. ``ARROW`` and ``LABEL`` describe (if needed) corresponding dilated arrows and label regions
+    """
+    ARROW = 1
+    CONDITIONS = 2
+    LABEL = 4
+    STEP_REACTANT = 9
+    STEP_PRODUCT = 10
+
 
 class Rect(object):
     """
     A rectangular region.
     Base class for all panels.
     """
-
     @classmethod
     def from_points(cls, points, greedy=False):
         """
@@ -256,10 +279,17 @@ class Rect(object):
 class Panel(Rect):
     """ Tagged section inside Figure"""
 
-    def __init__(self, left, right, top, bottom, tag=None):
+    def __init__(self, left, right, top, bottom, fig=None, tag=None):
         super(Panel, self).__init__(left, right, top, bottom)
         self.tag = tag
+        if fig is None:
+            self.fig = settings.main_figure[0]
+        else:
+            self.fig = fig
+
         self.role = None
+        self.parent_panel = None
+        self._crop = None
 
     # @property
     # def role(self):
@@ -290,23 +320,34 @@ class Panel(Rect):
     def pixel_ratio(self, pixel_ratio):
         self._pixel_ratio = pixel_ratio
 
+    @property
+    def crop(self):
+        if not self._crop:
+            self._crop = Crop(self.fig, [self.left, self.right, self.top, self.bottom])
+        return self._crop
+
+
 
 class Figure(object):
     """A figure image."""
 
-    def __init__(self, img):
+    def __init__(self, img, raw_img):
         """
-
         :param numpy.ndarray img: Figure image.
+        :param numpy.ndarray raw_img: raw image (without preprocessing, e.g. binarisation)
 
         """
         self.img = img
+        self.raw_img = raw_img
+        self.kernel_size = None
+        self.boundary_length = None
 
-        if isinstance(img, np.ndarray):
-            self.width, self.height = img.shape[1], img.shape[0]
-        elif isinstance(img, Rect):
-            self.width = img.right-img.left
-            self.height = img.bottom - img.top
+
+        # if isinstance(img, np.ndarray):
+        self.width, self.height = img.shape[1], img.shape[0]
+        # elif isinstance(img, Rect):
+        #     self.width = img.right-img.left
+        #     self.height = img.bottom - img.top
 
         self.center = (int(self.width * 0.5), int(self.height) * 0.5)
 
@@ -325,6 +366,12 @@ class Figure(object):
     @property
     def diagonal(self):
         return np.hypot(self.width, self.height)
+
+    @property
+    def backbones(self):
+        if self._backbones is None:
+            self.detect_structures()
+        return self._backbones
 
     def get_bounding_box(self):
         """ Returns the Panel object for the extreme bounding box of the image
@@ -349,21 +396,50 @@ class Figure(object):
         regions = regionprops(labelled)
         for region in regions:
             y1, x1, y2, x2 = region.bbox
-            panels.append(Panel(x1, x2, y1, y2, region.label - 1))  # Sets tags to start from 0
+            panels.append(Panel(x1, x2, y1, y2, fig=self, tag=region.label - 1))  # Sets tags to start from 0
 
         self.connected_components = panels
 
+    # def plot_backbones(self):
+    #     f = plt.figure()
+    #     ax = f.add_axes([.1, .1, .9, .9])
+    #     ax.imshow(self.img)
+    #
+    #     backbones = [cc for cc in self.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
+    #     for panel in backbones:
+    #         rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+    #                               facecolor='none', edgecolor='m')
+    #         ax.add_patch(rect_bbox)
+    #     plt.show()
 
-class Crop(Figure):
+
+    def role_plot(self):
+        colors = ['r', 'g', 'y', 'm', 'b', 'c', 'k']
+
+        f = plt.figure()
+        ax = f.add_axes([.1, .1, .9, .9])
+        ax.imshow(self.img)
+
+        for panel in self.connected_components:
+            if panel.role:
+                color = colors[panel.role.value]
+            else:
+                color = 'w'
+            rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+                                  facecolor='none', edgecolor=color)
+            ax.add_patch(rect_bbox)
+        plt.show()
+
+class Crop:
     def __init__(self, main_figure, crop_params):
         self.main_figure = main_figure
         self.crop_params = crop_params  # (left, right, top, bottom) of the intended crop or Rect() with these attribs
 
         self.cropped_rect = None  # Actual reactangle that was used for the crop - accounting for the boundaries in ``main_figure``
         self.img = None  # np.ndarray
+        self.raw_img = None
         self.crop_main_figure()
         self.get_connected_components()
-
 
     def __eq__(self, other):
         return self.main_figure == other.main_figure and self.crop_params == other.crop_params\
@@ -400,7 +476,7 @@ class Crop(Figure):
 
         new_left = cc.left - self.cropped_rect.left
         new_right = new_left + cc.width
-        new_obj = cc.__class__(left=new_left, right=new_right, top=new_top, bottom=new_bottom, )
+        new_obj = cc.__class__(left=new_left, right=new_right, top=new_top, bottom=new_bottom, fig=self.main_figure)
         new_obj.role = cc.role
         return new_obj
 
@@ -434,7 +510,8 @@ class Crop(Figure):
         :rtype: numpy.ndarray
         """
         img = self.main_figure.img
-        if isinstance(self.crop_params, tuple):
+        raw_img = self.main_figure.raw_img
+        if isinstance(self.crop_params, Collection):
             left, right, top, bottom = self.crop_params
         else:
             p = self.crop_params
@@ -447,9 +524,11 @@ class Crop(Figure):
         top = max(0, top if top else 0)
         bottom = min(height, bottom if bottom else width)
         out_img = img[top: bottom, left: right]
+        out_raw_img = raw_img[top:bottom, left:right]
 
         self.cropped_rect = Rect(left, right, top, bottom)
         self.img = out_img
+        self.raw_img = out_raw_img
 
 
 class TextLine:
@@ -461,11 +540,11 @@ class TextLine:
     text_line. The ``crop`` attribute defines the coordinate system to which panels in ``_connected_components`` belong.
     It is set to None by default, which indicates text line coordinates in the main figure are given.
     """
-    def __init__(self, left, right, top, bottom, crop=None, anchor=None, connected_components=[]):
+    def __init__(self, left, right, top, bottom, fig=None, crop=None, anchor=None, connected_components=[]):
         self.text = None
         self.crop = crop
         self._anchor = anchor
-        self.panel = Panel(left, right, top, bottom)
+        self.panel = Panel(left, right, top, bottom, fig)
 
 
 
@@ -473,11 +552,25 @@ class TextLine:
         self._connected_components = connected_components
         # self.find_text() # will be used to find text from `connected_components`
 
+    def __repr__(self):
+        left = self.panel.left
+        right = self.panel.right
+        top = self.panel.top
+        bottom = self.panel.bottom
+        return f'TextLine(left={left}, right={right}, top={top}, bottom={bottom})'
+
     def __iter__(self):
         return iter(self.connected_components)
 
     def __contains__(self, item):
         return item in self.connected_components
+
+    def __hash__(self):
+        left = self.panel.left
+        right = self.panel.right
+        top = self.panel.top
+        bottom = self.panel.bottom
+        return hash(left + right + top + bottom)
 
     @property
     def height(self):

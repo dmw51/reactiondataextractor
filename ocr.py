@@ -33,12 +33,12 @@ from skimage.filters import gaussian
 
 from chemdataextractor.doc.text import Sentence
 from chemdataextractor.parse.cem import BaseParser
-from chemschematicresolver import decorators, io, model
+from chemschematicresolver import decorators, io_, model
 from utils.processing import convert_greyscale, crop, crop_rect, pad, normalize_image
 from chemschematicresolver.parse import ChemSchematicResolverTokeniser, LabelParser
 
 import matplotlib.pyplot as plt
-log = logging.getLogger(__name__)
+log = logging.getLogger('extract.ocr')
 
 # Whitelist for labels
 ALPHABET_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
@@ -195,16 +195,16 @@ def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CO
     panel = textline.panel
     crop = panel.create_crop(fig)
     cropped_img = pad(crop.img, (10, 10))
-    cropped_img = gaussian(cropped_img, sigma=0.5, mode='nearest')
+    # cropped_img = gaussian(cropped_img, sigma=0.5, mode='nearest')
     # plt.imshow(cropped_img)
     # plt.title('cropped condition text line')
     # plt.show()
     # print(f'max of crop: {np.max(cropped_img)}')
     # print(f'min of crop: {np.min(cropped_img)}')
-    cropped_img = normalize_image(cropped_img)
+    # cropped_img = normalize_image(cropped_img)
 
     text, avg_conf = choose_best_ocr_configuration(cropped_img, x_offset=panel.left, y_offset=panel.top,
-                                            psms=[PSM.SINGLE_CHAR], whitelist=whitelist, pad_val=pad_val)
+                                            psms=[PSM.SINGLE_LINE, PSM.SINGLE_WORD], whitelist=whitelist, pad_val=pad_val)
     raw_sentence = get_sentences(text)
 
     if len(raw_sentence) == 1:
@@ -219,7 +219,6 @@ def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CO
     return tagged_sentence if avg_conf > conf_threshold else []
 
 
-
 def read_isolated_conditions(isolated_block):
     """
     Helper function to read conditions from isolated connected components segmented as conditions' text characters
@@ -229,6 +228,7 @@ def read_isolated_conditions(isolated_block):
     fig = isolated_block
     conditions_region = isolated_block.get_bounding_box()
     return read_conditions(fig, conditions_region)
+
 # These enums just wrap tesserocr functionality, so we can return proper enum members instead of ints.
 
 class Orientation(enum.IntEnum):
@@ -432,7 +432,7 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, white
             'top': top + y_offset - img_padding,
             'bottom': bottom + y_offset - img_padding,
             'confidence': it.Confidence(ril),
-            'orientation': Orientation(orientation),  # TODO
+            'orientation': Orientation(orientation),
             'writing_direction': WritingDirection(writing_direction),
             'textline_order': TextlineOrder(textline_order),
             'deskew_angle': deskew_angle
@@ -448,7 +448,7 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, white
         # api.SetVariable("segment_penalty_dict_case_bad", "0")
         # Convert image to PIL to load into tesseract (suppress precision loss warning)
         with warnings.catch_warnings(record=True) as ws:
-            pil_img = io.img_as_pil(img)
+            pil_img = io_.img_as_pil(img)
         api.SetImage(pil_img)
         if whitelist is not None:
             api.SetVariable('tessedit_char_whitelist', whitelist)
@@ -513,7 +513,7 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, white
                 word.symbols.append(symbol)
             except RuntimeError as e:
                 # Happens if no text was detected
-                log.info(e)
+                log.debug(e)
 
             if not it.Next(RIL.SYMBOL):
                 break

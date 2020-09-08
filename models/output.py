@@ -5,7 +5,7 @@ This file contains data structures required to represent the output of ReactionD
 from abc import ABC, abstractmethod
 from collections import Counter
 import json
-from models.reaction import Reactant, Product
+from models.reaction import ChemicalStructure, ChemicalStructure
 
 
 from models.reaction import Conditions
@@ -81,8 +81,8 @@ class ReactionScheme(Graph):
         graph = self._graph_dict
         self.set_start_end_nodes()
 
-        self._single_path = True if all(len(graph[item]) == 1 or item == self.products for item in graph) else False
-        # Simpler __str__ if an image consists of a single reaction path
+        # self._single_path = True if all(len(graph[item]) == 1 or self.products == item for item in graph) else False
+        self._single_path = True if len(self._start) == 1 and len(self._end) == 1 else False
 
     def edges(self):
         if not self._graph_dict:
@@ -103,6 +103,11 @@ class ReactionScheme(Graph):
         #     return '  --->  '.join((' + '.join(str(species) for species in group)) for group in path)
         # else:
         return str(self._graph_dict)
+
+    def __eq__(self, other):
+        if isinstance(other, ReactionScheme):
+            return other._graph_dict == self._graph_dict
+        return False
 
     @property
     def graph(self):
@@ -144,10 +149,10 @@ class ReactionScheme(Graph):
         """
         group_count = Counter(group for step in self._reaction_steps for group in (step.reactants, step.products))
         self._start = [group for group, count in group_count.items() if count == 1 and
-                       all(isinstance(species, Reactant) for species in group)]
+                       all(isinstance(species, ChemicalStructure) for species in group)]
 
         self._end = [group for group, count in group_count.items() if count == 1 and
-                     all(isinstance(species, Product) for species in group)]
+                     all(isinstance(species, ChemicalStructure) for species in group)]
 
     def find_path(self, group1, group2, path=None):
         graph = self._graph_dict
@@ -201,6 +206,13 @@ class ReactionScheme(Graph):
     #     return json_obj
 
     def _json_generic_recursive(self, start_key, json_obj=None):
+        """
+        Generic recursive json string generator. Takes in a single ``start_key`` node and builds up the ``json_obj`` by
+        traverding the reaction graph
+        :param start_key: node where the traversal begins (usually the 'first' group of reactants in the reactions)
+        :param json_obj: a dictionary created in the recursive procedure (ready for json dumps)
+        :return:  dict; the created ``json_obj``
+        """
         graph = self._graph_dict
 
         if json_obj is None:
@@ -225,10 +237,45 @@ class ReactionScheme(Graph):
 
         return json_obj
 
+    def to_smirks(self, start_key=None, species_strings=None):
+        """
+        Converts the reaction graph into a SMIRKS (or more appropriately - reaction SMILES, its subset). Also outputs
+        a string containing auxiliary information from the conditions' dictionary.
+        :param start_key: node where the traversal begins (usually the 'first' group of reactants in the reactions)
+        :param species_strings: list of found smiles strings (or chemical formulae) built up in the procedure and ready
+        for joining into a single SMIRKS string.
+        :return: (str, str) tuple containing a (reaction smiles, auxiliary info) pair
+        """
+        if not self._single_path:
+            return NotImplemented  # SMIRKS only work for single-path reaction
 
+        graph = self._graph_dict
 
+        if start_key is None:
+            start_key = self._start[0]
 
+        if species_strings is None:
+            species_strings = []
 
+        node = start_key
 
+        if hasattr(node, '__iter__'):  # frozenset of reactants or products
+            species_str = '.'.join(species.smiles for species in node)
+        else:  # Conditions object
+            # The string is a sum of coreactants, catalysts (which have small dictionaries holding names and values/units)
+            species_vals = '.'.join(species_dct['Species'] for group in iter((node['coreactants'], node['catalysts'],
+                                                               )) for species_dct in group)
+            # and auxiliary species with simpler structures (no units)
+            species_novals = '.'.join(group for group in node['other species'] )
+            species_str = '.'.join(filter(None, [species_vals, species_novals]))
 
+        species_strings.append(species_str)
 
+        successors = graph[node]
+        if not successors:
+            smirks ='>'.join(species_strings)
+            return smirks
+        else:
+            return self.to_smirks(successors[0], species_strings)
+
+        return smirks, [node.conditions_dct for node in graph if isinstance(node, Conditions)]
