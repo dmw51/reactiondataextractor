@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 import collections
+import copy
 import enum
 import logging
 import warnings
@@ -30,12 +31,14 @@ import tesserocr
 from skimage.morphology import skeletonize
 from skimage.transform import rescale
 from skimage.filters import gaussian
+from scipy import stats
 
 from chemdataextractor.doc.text import Sentence
 from chemdataextractor.parse.cem import BaseParser
 from chemschematicresolver import decorators, io_, model
-from utils.processing import convert_greyscale, crop, crop_rect, pad, normalize_image
+from utils.processing import convert_greyscale, crop, crop_rect, pad, normalize_image, isolate_patches, erase_elements
 from chemschematicresolver.parse import ChemSchematicResolverTokeniser, LabelParser
+from models.segments import Crop
 
 import matplotlib.pyplot as plt
 log = logging.getLogger('extract.ocr')
@@ -47,14 +50,15 @@ DIGITS = '0123456789'
 SUBSCRIPT = '₁₂₃₄₅₆₇₈₉ₓ₋'
 SUPERSCRIPT = '⁰°'
 ASSIGNMENT = ':=-'
+HYPHEN = '-'
 CONCENTRATION = '%()'
 BRACKETS ='[]{}'
 SEPARATORS = ',. '
 OTHER = r'\'`/@'
 LABEL_WHITELIST = (ASSIGNMENT + DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION +
                    OTHER + SUBSCRIPT + SUPERSCRIPT + SEPARATORS)
-CONDITIONS_WHITELIST = DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION + SEPARATORS + BRACKETS + SUPERSCRIPT\
-                       + OTHER
+CONDITIONS_WHITELIST = DIGITS + ALPHABET_UPPER + ALPHABET_LOWER + CONCENTRATION + SEPARATORS + BRACKETS + SUPERSCRIPT \
+                       + SUBSCRIPT + HYPHEN + OTHER
 CHAR_WHITELIST = DIGITS + '+' + ALPHABET_UPPER
 
 OCR_CONFIDENCE = 0.7
@@ -71,7 +75,6 @@ def choose_best_ocr_configuration(img, psms=[], invert=True, x_offset=0, y_offse
     :param str whitelist: whitelist for tesseract OCR process
     :return[TextBlock,...]: raw ocr output with the highest confidence score
     """
-
     raw_results = []
     for psm in psms:
         text = get_text(img, x_offset=x_offset, y_offset=y_offset, psm=psm, whitelist=whitelist, pad_val=pad_val)
@@ -158,12 +161,14 @@ def read_label(fig, label, whitelist=LABEL_WHITELIST):
 
     size = 5
     img = convert_greyscale(fig.img)
-    cropped_img = crop(img, label.left, label.right, label.top, label.bottom)
+    cropped_img = crop_rect(img, label.panel)['img']
     padded_img = pad(cropped_img, size, mode='constant', constant_values=(1, 1))
-    text = get_text(padded_img, x_offset=label.left, y_offset=label.top, psm=PSM.SINGLE_BLOCK, whitelist=whitelist)
+    text, avg_conf = choose_best_ocr_configuration(padded_img, x_offset=label.left, y_offset=label.top,
+                                         psms=[PSM.SINGLE_LINE, PSM.SINGLE_WORD, PSM.SINGLE_BLOCK], whitelist=whitelist)
+
     if not text:
-        label.text = []
-        return label, 0
+        return [], 0
+    log.info('Confidence in OCR: %s' % avg_conf)
     raw_sentences = get_sentences(text)
 
     if len(raw_sentences) is not 0:
@@ -172,14 +177,12 @@ def read_label(fig, label, whitelist=LABEL_WHITELIST):
                                            parsers=[BaseParser()]) for sentence in raw_sentences]
     else:
         tagged_sentences = []
-    label.text = tagged_sentences
 
     # Calculating average confidence for the block
-    confidences = [t.confidence for t in text]
-    avg_conf = np.mean(confidences)
-    log.info('Confidence in OCR: %s' % avg_conf)
 
-    return label, avg_conf
+
+
+    return tagged_sentences, avg_conf
 
 
 def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CONDITIONS_WHITELIST, pad_val=0):
@@ -193,8 +196,7 @@ def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CO
 
     # img = convert_greyscale(fig.img)   # Should  not be needed (pre-processed)
     panel = textline.panel
-    crop = panel.create_crop(fig)
-    cropped_img = pad(crop.img, (10, 10))
+    textline_crop = panel.create_padded_crop(fig)
     # cropped_img = gaussian(cropped_img, sigma=0.5, mode='nearest')
     # plt.imshow(cropped_img)
     # plt.title('cropped condition text line')
@@ -203,7 +205,7 @@ def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CO
     # print(f'min of crop: {np.min(cropped_img)}')
     # cropped_img = normalize_image(cropped_img)
 
-    text, avg_conf = choose_best_ocr_configuration(cropped_img, x_offset=panel.left, y_offset=panel.top,
+    text, avg_conf = choose_best_ocr_configuration(lift_subscripts(textline_crop), x_offset=panel.left, y_offset=panel.top,
                                             psms=[PSM.SINGLE_LINE, PSM.SINGLE_WORD], whitelist=whitelist, pad_val=pad_val)
     raw_sentence = get_sentences(text)
 
@@ -219,6 +221,45 @@ def read_conditions(fig, textline, conf_threshold = OCR_CONFIDENCE, whitelist=CO
     return tagged_sentence if avg_conf > conf_threshold else []
 
 
+def lift_subscripts(textline_crop, shift=None):
+    """
+    Finds subscripts in a text line and moves them up.
+
+    Recognise individual, relevant, connected components in a text line. If they're recognised as digits, moves them
+    up slightly to aid optical character recognition of the text line.
+    :param Crop textline_crop: a Crop object containing the text line region
+    :return: np.ndarray containing a new text line with subscripts moved up
+    """
+
+    # img = textline.crop.img
+    subs = []
+    mode_bottom = stats.mode([cc.bottom for cc in textline_crop.connected_components]).mode[0]
+    for cc in textline_crop.connected_components:
+        if cc.bottom > mode_bottom:
+            cc_img = isolate_patches(textline_crop, [cc])
+            cc_img = cc_img.img
+            block, confidence = choose_best_ocr_configuration(cc_img, psms=[PSM.SINGLE_WORD, PSM.SINGLE_CHAR],
+                                                              whitelist=CONDITIONS_WHITELIST, pad_val=0)
+            if block and block[0].text.strip() in list('0123456789'):
+                subs.append(cc)
+
+    f_erased = erase_elements(textline_crop, subs)
+    if subs:
+        if shift is None:
+            shift = int(np.mean([sub.bottom for sub in subs]) - mode_bottom)
+
+        for sub in subs:
+            arr = textline_crop.img[sub.top:sub.bottom + 1, sub.left:sub.right + 1]
+            f_erased.img[sub.top - shift:sub.bottom + 1 - shift, sub.left:sub.right + 1] = arr
+            # plt.imshow(f_erased.img)
+            # plt.title(f'shift = {shift}')
+            # plt.show()
+        # plt.imshow(f_erased.img)
+        # plt.show()
+        return f_erased.img
+
+    else:
+        return textline_crop.img
 def read_isolated_conditions(isolated_block):
     """
     Helper function to read conditions from isolated connected components segmented as conditions' text characters
@@ -374,7 +415,7 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, white
         img.shape, x_offset, y_offset, padding, whitelist
     )
     # Rescale image - make it larger
-    img = rescale(img, 2.0, order=1, mode='reflect', anti_aliasing=True, multichannel=False)
+
 
     # Add a buffer around the entire input image to ensure no text is too close to edges
     img_padding = 10
@@ -387,7 +428,7 @@ def get_text(img, x_offset=0, y_offset=0, psm=PSM.SINGLE_LINE, padding=20, white
     img = np.pad(img, pad_width=npad, mode='constant', constant_values=pad_val)
     shape = img.shape
     # plt.imshow(img)
-    # plt.title('padded, resized rde')
+    # plt.title('padded')
     # plt.show()
 
     # Rotate img before sending to tesseract if an img_orientation has been given
