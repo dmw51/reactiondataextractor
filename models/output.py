@@ -5,7 +5,7 @@ This file contains data structures required to represent the output of ReactionD
 from abc import ABC, abstractmethod
 from collections import Counter
 import json
-from models.reaction import ChemicalStructure, ChemicalStructure
+from models.reaction import Diagram, Diagram
 
 
 from models.reaction import Conditions
@@ -149,10 +149,10 @@ class ReactionScheme(Graph):
         """
         group_count = Counter(group for step in self._reaction_steps for group in (step.reactants, step.products))
         self._start = [group for group, count in group_count.items() if count == 1 and
-                       all(isinstance(species, ChemicalStructure) for species in group)]
+                       all(isinstance(species, Diagram) for species in group)]
 
         self._end = [group for group, count in group_count.items() if count == 1 and
-                     all(isinstance(species, ChemicalStructure) for species in group)]
+                     all(isinstance(species, Diagram) for species in group)]
 
     def find_path(self, group1, group2, path=None):
         graph = self._graph_dict

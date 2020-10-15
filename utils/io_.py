@@ -2,10 +2,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
-import logging
 
+import os
+import logging
+import warnings
 from models.segments import Figure
-from skimage import io
+from skimage import io as skio
 
 log = logging.getLogger('extract.io_')
 
@@ -17,19 +19,32 @@ def imread(filepath, bin_thresh=0.85):
     :param float bin_thresh : threshold used for binarisation
     :return: Figure
     """
-    raw_img = io.imread(filepath, plugin='pil')
+    raw_img = skio.imread(filepath, plugin='pil')
     log.info('Reading file - filepath: %s ' % filepath)
     if raw_img.max() == 255:
         raw_img = raw_img/255
 
-    img = io.imread(filepath, as_gray=True, plugin='pil')
+    img = skio.imread(filepath, as_gray=True, plugin='pil')
     if img.max() == 255:
         img = img/255
     img = img < bin_thresh
     return Figure(img, raw_img=raw_img)
 
+def imsave(f, img):
+    """Save an image to file.
+    :param string|file f: Filename or file-like object.
+    :param numpy.ndarray img: Image to save. Of shape (M,N) or (M,N,3) or (M,N,4).
+    """
+    with warnings.catch_warnings(record=True) as ws:
+        # Ensure we use PIL so we can guarantee that imsave will accept file-like object as well as filename
+        skio.imsave(f, img, plugin='pil', quality=100)
 
 
+def imdel(f):
+    """ Delete an image file
+    """
+
+    os.remove(f)
 
 # def extract_images(dirname, debug=False, allow_wildcards=False):
 #     """ Extracts the chemical schematic diagrams from a directory of input images

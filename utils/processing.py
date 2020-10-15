@@ -110,7 +110,7 @@ def get_bounding_box(fig):
     """ Gets the bounding box of each segment
 
     :param fig: Input Figure
-    :returns panels: List of panel objects
+    :returns panels: List of _panel objects
     """
     panels = []
     regions = regionprops(fig.img)
@@ -144,31 +144,39 @@ def label_and_get_ccs(fig):
 def erase_elements(fig, elements):
     """
     Erase elements from an image on a pixel-wise basis. if no `pixels` attribute, the function erases the whole
-    region inside the bounding box
+    region inside the bounding box. Automatically assigns roles to ccs in the new figure based on the original.
     :param Figure fig: Figure object containing binarized image
     :param iterable of panels elements: list of elements to erase from image
     :return: copy of the Figure object with elements removed
     """
-    fig= copy.deepcopy(fig)
+    temp_fig = copy.deepcopy(fig)
 
     try:
-        flattened = fig.img.flatten()
+        flattened = temp_fig.img.flatten()
         for element in elements:
             # print(arrow.pixels)
-            np.put(flattened, [pixel.row * fig.img.shape[1] + pixel.col for pixel in element.pixels], 0)
-        img_no_elements = flattened.reshape(fig.img.shape[0], fig.img.shape[1])
-        fig.img = img_no_elements
+            np.put(flattened, [pixel.row * temp_fig.img.shape[1] + pixel.col for pixel in element.pixels], 0)
+        img_no_elements = flattened.reshape(temp_fig.img.shape[0], temp_fig.img.shape[1])
+        temp_fig.img = img_no_elements
 
     except AttributeError:
         for element in elements:
-            fig.img[element.top:element.bottom+1, element.left:element.right+1] = 0
+            temp_fig.img[element.top:element.bottom+1, element.left:element.right+1] = 0
 
-    return fig
+    new_fig = Figure(temp_fig.img, fig.raw_img)
+    if hasattr(fig, 'kernel_sizes'):
+        new_fig.kernel_sizes = fig.kernel_sizes
+    for cc1 in new_fig.connected_components:
+        for cc2 in fig.connected_components:
+            if cc1 == cc2:
+                cc1.role = cc2.role   # Copy roles of ccs
+
+    return new_fig
 
 
 def dilate_fragments(fig, kernel_size):
     """
-    Applies binary dilation to `fig.img` using a disk-shaped structuring element of size ''kernel_size''.
+    Applies binary dilation to `fig.img` using a disk-shaped structuring element of size ''kernel_sizes''.
     :param Figure fig: Processed figure
     :param int kernel_size: size of the structuring element
     :return Figure: new Figure object
@@ -410,7 +418,8 @@ def isolate_patches(fig, to_isolate):
         right = connected_component.right
         isolated[top:bottom, left:right] = fig.img[top:bottom, left:right]
 
-    return Figure(img=isolated, raw_img=fig.raw_img)
+    fig = Figure(img=isolated, raw_img=fig.raw_img, )
+    return fig
 
 
 def postprocessing_close_merge(fig, to_close):
@@ -465,26 +474,26 @@ def intersect_rectangles(rect1, rect2):
     bottom = min(rect1.bottom, rect2.bottom)
     return Rect(left, right, top, bottom)
 
-# def belongs_to_textline(cropped_img, panel, textline,threshold=0.7):
+# def belongs_to_textline(cropped_img, _panel, textline,threshold=0.7):
 #     """
-#     Return True if a panel belongs to a text_line, False otherwise.
+#     Return True if a _panel belongs to a text_line, False otherwise.
 #     :param np.ndarray cropped_img: image cropped around text elements
-#     :param Panel panel: Panel containing connected component to check
-#     :param TextLine textline: Textline against which the panel is compared
+#     :param Panel _panel: Panel containing connected component to check
+#     :param TextLine textline: Textline against which the _panel is compared
 #     :param float threshold: threshold for assigning a cc to a text_line, ratio of on-pixels in a cc
 #                             contained within the line
-#     :return: bool True if panel lies on the text_line
+#     :return: bool True if _panel lies on the text_line
 #     """
 #
 #     #print('running belongs to text_line!')
-#     if textline.contains(panel): #if text_line covers the panel completely
+#     if textline.contains(_panel): #if text_line covers the _panel completely
 #         return True
 #
 #     # If it doesn't, check if the main body of connected component is within the text_line
-#     element = cropped_img[panel.top:panel.bottom, panel.left:panel.right]
+#     element = cropped_img[_panel.top:_panel.bottom, _panel.left:_panel.right]
 #     text_pixels = np.count_nonzero(element)
 #
-#     shared_space = intersect_rectangles(panel, textline)
+#     shared_space = intersect_rectangles(_panel, textline)
 #     cropped_element = cropped_img[shared_space.top:shared_space.bottom,
 #                       shared_space.left:shared_space.right]
 #
@@ -504,6 +513,12 @@ def is_boundary_cc(img, cc):
 
     return False
 
+
+def clean_output(text):
+    """ Remove whitespace and newline characters from input text."""
+
+
+    return text.replace('\n', '')
 
 # def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
 #     """
@@ -528,7 +543,7 @@ def is_boundary_cc(img, cc):
 def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, absolute=False):
     """
     Change coordinates of panels in a crop back to the parent frame of reference.
-    :param Rect crop_rect: original system where the panel was detected
+    :param Rect crop_rect: original system where the _panel was detected
     :param Rect expanded_rect: a larger part of an image, where a crop was formed
     :param iterable of Panels ccs: iterable of Panel objects to be transformed into the new coordinate system
     :param bool absolute: True if the `expanded_crop` coordinates are expressed in global coordinates,
@@ -767,3 +782,17 @@ def is_a_single_line(fig, panel, line_length):
     #
     # plt.show()
     return is_slope_consistent(lines)
+
+
+def merge_underlying_panels(fig, dilated_panel):
+    """
+    Merges all underlying connected components of ``dilated_panel`` to create a single, large _panel.
+
+    All connected components in ``fig`` that are entirel within the ``dilated`` _panel are merged to create an undilated
+    superpanel (important for standardisation)
+    :param Figure fig: Analysed figure
+    :param Panel dilated_panel: dilated superpanel
+    :return: Panel; undilated superpanel
+    """
+    ccs_to_merge = [cc for cc in fig.connected_components if dilated_panel.contains(cc)]
+    return create_megabox(ccs_to_merge)

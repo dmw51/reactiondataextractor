@@ -26,17 +26,19 @@ from correct import Correct
 from models.reaction import Conditions
 from models.arrows import SolidArrow
 from models.segments import Rect, Figure, TextLine, Crop, FigureRoleEnum, ReactionRoleEnum
-from models.utils import Point, Line
+from models.utils import Point, Line, DisabledNegativeIndices
 from utils.processing import approximate_line, create_megabox, find_minima_between_peaks
-from utils.processing import (binary_tag, get_bounding_box, erase_elements, belongs_to_textline, is_boundary_cc,
+from utils.processing import (binary_tag, get_bounding_box, erase_elements, is_boundary_cc,
                               isolate_patches, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region,
                               label_and_get_ccs)
 
+import settings
 from chemschematicresolver.actions import read_diagram_pyosra
 
 
 from ocr import read_conditions, read_isolated_conditions
-from chemdataextractor.doc import Paragraph, Span
+from chemdataextractor.doc import Paragraph, Span, Sentence
+from chemschematicresolver.parse import ChemSchematicResolverTokeniser
 from matplotlib.patches import Rectangle
 
 log = logging.getLogger('extract.conditions')
@@ -54,8 +56,8 @@ class ConditionParser:
     Species which fulfill neither criterion can be parsed as `other_chemicals`. `default_values` is also defined to help 
     parse both integers and floating-point values.
     """
-    default_values = r'((?:\d\.)?\d{1,2})'
-    cat_units = r'(mol\s?%|M)'
+    default_values = r'((?:\d\.)?\d{1,3})'
+    cat_units = r'(mol\s?%|M|wt\s?%)'
     co_units = r'(equiv(?:alents?)?\.?|m?L)'
 
     def __init__(self, sentences, ):
@@ -76,7 +78,7 @@ class ConditionParser:
 
             coreactants_lst.extend(parsed[0])
             catalysis_lst.extend(parsed[1])
-            other_species_lst.extend(parsed[2])
+            other_species_lst.extend(ConditionParser._filter_species(parsed))
             conditions_dct.update(parsed[3])
 
         conditions_dct['coreactants'] = coreactants_lst
@@ -88,9 +90,11 @@ class ConditionParser:
     @staticmethod
     def _identify_species(sentence):
 
-        formulae_identifiers = r'(?<!°)(\(?\b(?:[A-Z]+[a-z]{0,2}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
-        # letters between which some lowercase letters and digits are allows, optional brackets
+        #formulae_identifiers = r'(\(?\b(?:[A-Z]+[a-z]{0,1}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
+        # letters between which some lowercase letters and digits are allowed, optional brackets
         # cems = [cem.text for cem in cems]
+        formulae_brackets = r'((?:[A-Z]*\d?[a-z]\d?)\((?:[A-Z]*\d?[a-z]?\d?)*\)?\d?[A-Z]*[a-z]*\d?)*'
+        formulae_bracketless = r'(?<!°)\b(?<!\)|\()((?:[A-Z]+\d?[a-z]?\d?)+)(?!\(|\))\b'
         letter_base_identifiers = r'((?<!°)\b[A-Z]{1,4}\b)'  # Up to four capital letters? Just a single one?
 
         number_identifiers = r'(?:^| )(?<!\w)([1-9])(?!\w)(?!\))(?:$|[, ])(?![A-Za-z])'
@@ -99,23 +103,24 @@ class ConditionParser:
         # CH3OH, 5, 6 (5 equiv) 5 and 6 in the middle only
         # 5 5 equiv  first 5 only
         # A 5 equiv -no matches
-        entity_mentions_formulae = re.finditer(formulae_identifiers, sentence.text)
+        entity_mentions_brackets = re.finditer(formulae_brackets, sentence.text)
+        entity_mentions_bracketless = re.finditer(formulae_bracketless, sentence.text)
         entity_mentions_letters = re.finditer(letter_base_identifiers, sentence.text)
 
         entity_mentions_numbers = re.finditer(number_identifiers, sentence.text)
 
-        numbers_letters_span = [Span(e.group(1), e.start(), e.end()) for e in
-                                chain(entity_mentions_formulae, entity_mentions_numbers, entity_mentions_letters)]
+        spans = [Span(e.group(1), e.start(), e.end()) for e in
+                                chain(entity_mentions_brackets, entity_mentions_bracketless,
+                                      entity_mentions_numbers, entity_mentions_letters) if e.group(1)]
 
-        all_mentions = [mention for mention in chain(entity_mentions_formulae, numbers_letters_span)
-                        if mention]
-
+        all_mentions = [mention for mention in spans]
+        all_mentions = [mention for mention in all_mentions if mention != 'M']  # Special case, denotes concentration
         return list(set(all_mentions))
 
     @staticmethod
     def _parse_coreactants(sentence):
         co_values = ConditionParser.default_values
-        co_str = re.compile(co_values + r'\s?' + ConditionParser.co_units)
+        co_str = co_values + r'\s?' + ConditionParser.co_units
 
         return ConditionParser._find_closest_cem(sentence, co_str)
 
@@ -123,7 +128,7 @@ class ConditionParser:
     @staticmethod
     def _parse_catalysis(sentence):
         cat_values = ConditionParser.default_values
-        cat_str = re.compile(cat_values + r'\s?' + ConditionParser.cat_units)
+        cat_str = cat_values + r'\s?' + ConditionParser.cat_units
 
         return ConditionParser._find_closest_cem(sentence, cat_str)
 
@@ -134,10 +139,11 @@ class ConditionParser:
 
         other_species = []
         for cem in cems:
-            species_str = re.compile('(' + cem.text + ')' + other_species_if_end)
+            cem = cem.text
+            species_str = re.compile('(' + re.escape(cem) + ')' + other_species_if_end)
             species = re.search(species_str, sentence.text)
-            if species and species.group(1) == cem.text:
-                other_species.append(cem.text)
+            if species and species.group(1) == cem:
+                other_species.append(cem)
 
         return other_species
 
@@ -163,23 +169,53 @@ class ConditionParser:
     @staticmethod
     def _find_closest_cem(sentence, parse_str):
         matches = []
-
+        bracketed_units_pat = re.compile(r'\(\s*'+parse_str+r'\s*\)')
+        bracketed_units = re.findall(bracketed_units_pat, sentence.text)
+        if bracketed_units:
+            sentence = Sentence(re.sub(bracketed_units_pat, ' '.join(bracketed_units[0]), sentence.text))
+        else:
+            parse_str = re.compile(parse_str)
         for match in re.finditer(parse_str, sentence.text):
-            match_start = match.group(1)
-            match_start_idx = [idx for idx, token in enumerate(sentence.tokens) if token.text == match_start][0]
+            #TODO: match_sent should be a sequence of tokens. Look up tokenisers in CDE
+            match_sent = Sentence(match.group(0), word_tokenizer=ChemSchematicResolverTokeniser())
+            match_start_idx = [idx for idx, token in enumerate(sentence.raw_tokens) if token == match_sent.raw_tokens[0]][0]
+            match_end_idx = [idx for idx, token in enumerate(sentence.raw_tokens) if token == match_sent.raw_tokens[-1]][0]
+            #Accept two tokens, strip commas and full stops, especially if one of the tokens
+            species = DisabledNegativeIndices(sentence.tokens)[match_start_idx-2:match_start_idx]
+            species = ' '.join(token.text for token in species).strip('., ')
+            if not species:
+                try:
+                    species = DisabledNegativeIndices(sentence.tokens)[match_end_idx+1:match_start_idx+4]
+                    species = ' '.join(token.text for token in species).strip('., ')
+                except IndexError:
+                    log.debug('Closest CEM not found for a catalyst/coreactant key phrase')
+                    species = ''
 
-            length_condition = len(sentence.tokens[:match_start_idx]) >= 2
-            comma_delimiter_condition = sentence.tokens[match_start_idx-2].text != ','
+            if species:
+                    matches.append({'Species': species, 'Value': float(match.group(1)), 'Units': match.group(2)})
 
-            if length_condition and comma_delimiter_condition:
-                species = sentence.tokens[match_start_idx - 2:match_start_idx]
-                species = ' '.join(token.text for token in species)
-            else:
-                species = sentence.tokens[match_start_idx - 1].text
-
-            matches.append({'Species': species, 'Value': float(match.group(1)), 'Units': match.group(2)})
-
+    # length_condition = len(sentence.tokens[:match_start_idx]) >= 2
+    # comma_delimiter_condition = sentence.tokens[match_start_idx-2].text != ','  # Error-prone; -ve indexing
+    #
+    # if length_condition and comma_delimiter_condition:  # Accept 2-token species if match preceded
+    #     # by at least two tokens and first of them is not a comma
+    #     species = sentence.tokens[match_start_idx - 2:match_start_idx]
+    #     species = ' '.join(token.text for token in species)
+    # else:
+    #     species = sentence.tokens[match_start_idx - 1].text
         return matches
+
+    @staticmethod
+    def _filter_species(parsed):
+        """ If a chemical species has been assigned as both catalyst or coreactant, and `other species`, remove if from
+        the latter"""
+        coreactants, catalysts, other_species, _ = parsed
+        combined = [d['Species'] for d in coreactants] + [d['Species'] for d in catalysts]
+        if combined:
+            combined.extend(*[species.split(' ') for species in combined])  # include individual tokens for multi-token names
+        other_species = [species for species in other_species if species not in combined]
+
+        return list(set(other_species))
 
 
     @staticmethod
@@ -198,9 +234,9 @@ class ConditionParser:
         # generic descriptors like 'heat' or 'UHV' in `.group(1)'
         t_units = r'\s?(?:o|O|0|°)C|K'   # match 0C, oC and similar, as well as K
 
-        t_value1 = r'\d{1,4}' + r'\s?(?=' + t_units + ')'  # capture numbers only if followed by units
+        t_value1 = r'-?\d{1,4}' + r'\s?(?=' + t_units + ')'  # capture numbers only if followed by units
         t_value2 = r'r\.?\s?t\.?'
-        t_value3 = r'heat'
+        t_value3 = r'heat|reflux|room\s?temp'
 
         # Add greek delta?
         t_or = re.compile('(' + '|'.join((t_value1, t_value2, t_value3 ))+ ')' + '(' + t_units + ')' + '?', re.I)
@@ -262,94 +298,18 @@ def get_conditions(fig, arrow):
     [setattr(panel, 'role', ReactionRoleEnum.CONDITIONS) for panel in condition_structures]
 
     if textlines:
-        recognised = [read_conditions(fig, line, conf_threshold=0.6) for line in textlines]
+        recognised = [read_conditions(fig, line, conf_threshold=0.4) for line in textlines]
+        print(recognised)
         # print(f'recognised text: {recognised}')
-        spell_checked = [Correct(line).correct_text() for line in recognised if line]
-        parser = ConditionParser(spell_checked)
+        # spell_checked = [Correct(line).correct_text() for line in recognised if line]
+        recognised = [sentence for sentence in recognised if sentence]
+        parser = ConditionParser(recognised)
         conditions_dct = parser.parse_conditions()
     else:
         conditions_dct = {}
-    return Conditions(textlines, conditions_dct, arrow)
+    return Conditions(textlines, conditions_dct, arrow, condition_structures), condition_structures
 
-# def find_reaction_conditions(fig, arrow, panels, stepsize=10, steps=10):
-#     """
-#     Given a reaction arrow_bbox and all other bboxes, this function looks for reaction information around it
-#     If dense_graph is true, the initial arrow's bbox is scaled down to avoid false positives
-#     Currently, the function only works for horizontal arrows - extended by implementing Bresenham's line algorithm
-#     :param Figure fig: Analysed figure
-#     :param Arrow arrow: Arrow object
-#     :param iterable panels: List of Panel object
-#     :param float global_skel_pixel_ratio: value describing density of on-pixels in a graph
-#     :param int stepsize: integer value decribing size of step between two line scanning operations
-#     """
-#     # panels = [panel for panel in panels if panel.area < 55**2]  # Is this necessary?
-#
-#     arrow = copy.deepcopy(arrow)
-#     sorted_pts_col = sorted(arrow.line, key= lambda pt: pt.col)
-#     p1, p2 = sorted_pts_col[0], sorted_pts_col[-1]
-#
-#     arrow_length = p1.dist(p2)
-#     shrink_constant = int(arrow_length/(2*steps))
-#
-#     overlapped = set()
-#     rows = []
-#     columns = []
-#     for direction in range(2):
-#         boredom_index = 0 # increments if no overlaps found. if nothing found in 5 steps,
-#         # the algorithm breaks from a loop
-#         increment = (-1) ** direction
-#         p1_scancol, p2_scancol = p1.col, p2.col
-#         p1_scanrow, p2_scanrow = p1.row, p2.row
-#
-#         for step in range(steps):
-#             # Reduce the scanned area proportionally to distance from arrow
-#             p1_scancol += shrink_constant # These changes dont work as expected - need to check them
-#             p2_scancol -= shrink_constant  #  int(p2_scancol * .99)
-#
-#             # print('p1: ',p1_scanrow,p1.col)
-#             # print('p2: ', p2_scanrow,p2.col)
-#             p1_scanrow += increment*stepsize
-#             p2_scanrow += increment*stepsize
-#             rows.extend((p1_scanrow, p2_scanrow))
-#             columns.extend((p1_scancol, p2_scancol))
-#             # print(f'approximating between points {p1_scanrow, p1_scancol} and {p2_scanrow, p2_scancol}')
-#             line = approximate_line(Point(row=p1_scanrow, col=p1_scancol), Point(row=p2_scanrow, col=p2_scancol))
-#             overlapping_panels = [panel for panel in panels if panel.overlaps(line)]
-#
-#             if overlapping_panels:
-#                 overlapped.update(overlapping_panels)
-#                 boredom_index = 0
-#             else:
-#                 boredom_index += 1
-#
-#             if boredom_index >= 5:  # Nothing found in the last five steps
-#                 break
-#     print(f'rows: {rows}')
-#     print(f'cols: {columns}')
-#     # f = plt.figure(figsize=(20,20))
-#     # ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
-#     # ax.imshow(fig.img, cmap=plt.cm.binary)
-#     # pairs = list(zip(rows, columns))
-#     # for i in range(0,len(rows)-1,2):
-#     #     p1 = pairs[i]
-#     #     p2 = pairs[i+1]
-#     #     y, x = list(zip(*[p1, p2]))
-#     #
-#     #     ax.plot(x, y, 'r')
-#     # ax.axis('off')
-#     # plt.savefig('diamond2.tif')
-#
-#
-#     # plt.imshow(fig.img, cmap=plt.cm.binary)
-#     # plt.scatter(columns, rows, c='y', s=1)
-#     # plt.savefig('destination_path.jpg', format='jpg', dpi=1000)
-#     # plt.show()
-#     if overlapped:
-#         conditions_text = scan_conditions_text(fig, overlapped, arrow)
-#         return conditions_text # Return as a set to allow handling along with product and reactant sets
-#
-#     else:
-#         log.warning('No conditions were found in the initial scan. Aborting conditions search...')
+
 
 
 def find_step_conditions(fig: Figure, arrow: SolidArrow):
@@ -367,12 +327,13 @@ def find_step_conditions(fig: Figure, arrow: SolidArrow):
     conditions_panels = [panel for panel in structure_panels if belongs_to_conditions(panel, arrow)]
 
 
-    text_lines = mark_text_lines(fig, arrow)
+    text_lines = mark_text_lines(fig, arrow, conditions_panels)
     # if not text_lines:
     #     return []
 
     for text_line in text_lines:
         collect_characters(fig, text_line)
+    text_lines = [text_line for text_line in text_lines if text_line.connected_components]
 
 
     ##
@@ -384,8 +345,8 @@ def find_step_conditions(fig: Figure, arrow: SolidArrow):
     # for t in text_lines:
     #     print(f'len cc: {len(t.connected_components)}')
     #     color = next(c)
-    #     for panel in t.connected_components:
-    #         rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+    #     for _panel in t.connected_components:
+    #         rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right - _panel.left, _panel.bottom - _panel.top,
     #                               facecolor='none', edgecolor=color)
     #         ax.add_patch(rect_bbox)
     # plt.show()
@@ -401,8 +362,8 @@ def find_step_conditions(fig: Figure, arrow: SolidArrow):
 # c = iter(['y', 'b', 'r', 'g'])
 # for t in text_lines:
 #     color = next(c)
-#     for panel in t.connected_components:
-#         rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+#     for _panel in t.connected_components:
+#         rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right - _panel.left, _panel.bottom - _panel.top,
 #                               facecolor='none', edgecolor=color)
 #         ax.add_patch(rect_bbox)
 # plt.show()
@@ -435,15 +396,18 @@ def belongs_to_conditions(structure_panel, arrow):
     closest = min([parallel_1, parallel_2, react_endpoint, prod_endpoint],
                   key=lambda point: structure_panel.separation(point))
 
-    if closest in [parallel_1, parallel_2] and structure_panel.separation(closest) < 1.5 * np.sqrt(structure_panel.area):
+    if closest in [parallel_1, parallel_2] and structure_panel.separation(arrow.panel) < 1.0 * np.sqrt(structure_panel.area):
         return True
     else:
         return False
 
 
-def mark_text_lines(fig, arrow):
+def mark_text_lines(fig, arrow, conditions_panels):
     """
     Isolates conditions around around ``arrow`` in ``fig``.
+
+    Marks text lines first by finding obvious conditions' text characters around an arrow. This scan is also performed
+    around `conditions_panels` if any. Using the found ccs, text lines are fitted with kernel density estimates.
     :param Figure fig: analysed figure
     :param SolidArrow arrow: arrow around which the region of interest is centered
     :return: Crop: Figure-like object containing the relevant crop with the arrow removed
@@ -466,19 +430,23 @@ def mark_text_lines(fig, arrow):
                                condition=condition)
     if not core_ccs:
         for pixel in arrow.pixels[::10]:
-            relevant_ccs = find_nearby_ccs(pixel, fig.connected_components, (2*average_height, distance_fn),
-                                           condition=condition)
-            if len(relevant_ccs) > 1:
+            core_ccs = find_nearby_ccs(pixel, fig.connected_components, (2*average_height, distance_fn),
+                                       condition=condition)
+            if len(core_ccs) > 1:
                 break
         else:
             log.warning('No conditions were found in the initial scan. Aborting conditions search...')
             return []
 
+    if conditions_panels:
+        for panel in conditions_panels:
+            core_ccs += find_nearby_ccs(panel, fig.connected_components, (3 * average_height, distance_fn),
+                            condition=condition)
     # f = plt.figure()
     # ax = f.add_axes([0.1,0.1,0.8,0.8])
     # ax.imshow(fig.img)
-    # for panel in core_ccs:
-    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+    # for _panel in core_ccs:
+    #     rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right - _panel.left, _panel.bottom - _panel.top,
     #                           facecolor='none', edgecolor='r')
     #     ax.add_patch(rect_bbox)
     # plt.show()
@@ -497,9 +465,9 @@ def mark_text_lines(fig, arrow):
 
 
 
-    cropped_region = Crop(fig, conditions_region)
+    cropped_region = Crop(erase_elements(fig, conditions_panels), conditions_region) # Do not look at structures
 
-    text_lines = [TextLine(None, None, top, bottom, crop=cropped_region, anchor=anchor) for (top,bottom, anchor) in
+    text_lines = [TextLine(None, None, top, bottom, crop=cropped_region, anchor=anchor) for (top, bottom, anchor) in
                   identify_text_lines(cropped_region)]
 
     text_lines = [text_line.in_main_figure for text_line in text_lines]
@@ -508,6 +476,7 @@ def mark_text_lines(fig, arrow):
     #     text_line.find_anchor(core_ccs)
 
     return text_lines
+
 
 def collect_characters(fig, text_line):
     """
@@ -522,16 +491,19 @@ def collect_characters(fig, text_line):
 
     relevant_ccs = [cc for cc in fig.connected_components if cc.role != FigureRoleEnum.ARROW]
     initial_distance = np.sqrt(np.mean([cc.area for cc in relevant_ccs]))
-    distance_fn = lambda cc: 2 * np.max([cc.width, cc.height])
+    distance_fn = settings.DISTANCE_FN_CHARS
 
     proximity_coeff = lambda cc: .75 if cc.area < np.percentile([cc.area for cc in relevant_ccs], 65) else .4
-    condition = lambda cc: (abs(text_line.panel.center[1] - cc.center[1]) < proximity_coeff(cc) * text_line.panel.height)\
-                           and (cc.height < text_line.panel.height * 1.7)
+    condition1 = lambda cc: (abs(text_line.panel.center[1] - cc.center[1]) < proximity_coeff(cc) * text_line.panel.height)
+    condition2 = lambda cc: (cc.height < text_line.panel.height * 1.7)
+    condition3 = lambda cc: abs(text_line.panel.bottom - cc.bottom) < 0.65 * text_line.panel.height
+    condition = lambda cc: condition1(cc) and condition2(cc) and condition3(cc)
     # first condition is cc.center in y direction close to center of text_line. Second is that height is comparable to text_line
-    text_line.connected_components = find_nearby_ccs(text_line.anchor, relevant_ccs,
-                                                     (initial_distance, distance_fn), FigureRoleEnum.CONDITIONSCHAR, condition)
-
-# def scan_conditions_text2(conditions_crop, arrow):
+    found_ccs = find_nearby_ccs(text_line.anchor, relevant_ccs,(initial_distance, distance_fn),
+                                FigureRoleEnum.CONDITIONSCHAR, condition)
+    if found_ccs:
+        text_line.connected_components = found_ccs
+    # def scan_conditions_text2(conditions_crop, arrow):
 #     """
 #     Given the ``conditions region`` Crop containing step conditions, filters out all irrelevant elements.
 #     Uses ``arrow`` in a clustering process
@@ -583,8 +555,8 @@ def collect_characters(fig, text_line):
 #     text_candidate_buckets = assign_characters_to_textlines(search_region.img, textlines, ccs)
 #     # # print(f'example text_line ccs: {text_candidate_buckets[0].connected_components}')
 #     mixed_text_candidates = [element for textline in text_candidate_buckets for element in textline]
-#     # for panel in mixed_text_candidates:
-#     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='r',edgecolor='b', alpha=0.35)
+#     # for _panel in mixed_text_candidates:
+#     #     rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left, _panel.bottom-_panel.top, facecolor='r',edgecolor='b', alpha=0.35)
 #     #     ax.add_patch(rect_bbox)
 #     #
 #     # plt.savefig('cond_chars_initial.tif')
@@ -663,8 +635,8 @@ def collect_characters(fig, text_line):
 #     text_candidate_buckets = assign_characters_to_textlines(search_region.img, textlines, ccs)
 #     # # print(f'example text_line ccs: {text_candidate_buckets[0].connected_components}')
 #     mixed_text_candidates = [element for textline in text_candidate_buckets for element in textline]
-#     # for panel in mixed_text_candidates:
-#     #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='r',edgecolor='b', alpha=0.35)
+#     # for _panel in mixed_text_candidates:
+#     #     rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left, _panel.bottom-_panel.top, facecolor='r',edgecolor='b', alpha=0.35)
 #     #     ax.add_patch(rect_bbox)
 #     #
 #     # plt.savefig('cond_chars_initial.tif')
@@ -703,9 +675,9 @@ def collect_characters(fig, text_line):
 #     crop_no_letters = erase_elements(Figure(cropped_img),text_ccs)
 #     # f, ax = plt.subplots()
 #     # ax.imshow(crop_no_letters.img)
-#     # for panel in text_ccs:
-#     #    rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left,
-#     #    panel.bottom-panel.top, facecolor='g',edgecolor='b',alpha=0.7)
+#     # for _panel in text_ccs:
+#     #    rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left,
+#     #    _panel.bottom-_panel.top, facecolor='g',edgecolor='b',alpha=0.7)
 #     #    ax.add_patch(rect_bbox)
 #     # ax.set_title('characters removed')
 #     # plt.show()
@@ -728,9 +700,9 @@ def collect_characters(fig, text_line):
 #
 #     # f, ax = plt.subplots()
 #     # ax.imshow(crop_no_structures.img)
-#     # for panel in text_ccs:
-#     #    rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left,
-#     #    panel.bottom-panel.top, facecolor='none',edgecolor='b')
+#     # for _panel in text_ccs:
+#     #    rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left,
+#     #    _panel.bottom-_panel.top, facecolor='none',edgecolor='b')
 #     #    ax.add_patch(rect_bbox)
 #     # ax.set_title('structures removed')
 #     # plt.show()
@@ -740,7 +712,13 @@ def collect_characters(fig, text_line):
 
 def identify_text_lines(crop):
     ccs = [cc for cc in crop.connected_components if cc.role != FigureRoleEnum.ARROW]  # filter out arrows
-    ccs = [cc for cc in ccs if cc.area > np.percentile([cc.area for cc in ccs], 0.2)]   # filter out all small ccs (e.g. dots)
+
+    if len(ccs) == 1:  # Special case
+        only_cc = ccs[0]
+        anchor = Point(only_cc.center[1], only_cc.center[0])
+        return [(only_cc.top, only_cc.bottom, anchor)]
+    if len(ccs) > 10:
+        ccs = [cc for cc in ccs if cc.area > np.percentile([cc.area for cc in ccs], 0.2)]   # filter out all small ccs (e.g. dots)
 
     img = crop.img
     bottom_boundaries = [cc.bottom for cc in ccs]
@@ -787,8 +765,8 @@ def identify_text_lines(crop):
     # ax = f.add_axes([0.1, 0.1, 0.9, 0.9])
     # ax.imshow(img)
     # b = bucketed_chars[0]
-    # for panel in b:
-    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
+    # for _panel in b:
+    #     rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left, _panel.bottom-_panel.top, facecolor='none',edgecolor='r')
     #     ax.add_patch(rect_bbox)
     # plt.show()
 
@@ -818,34 +796,34 @@ def identify_text_lines(crop):
     #
     # plt.show()
     # textlines = [TextLine(None,top,bottom) for top, bottom in zip(top_lines,bottom_lines)]
-    return (line for line in zip(top_lines, bottom_lines, anchors))
+    return [line for line in zip(top_lines, bottom_lines, anchors)]
 
 
-def assign_characters_to_textlines(img, textlines, ccs, transform_from_crop=False, crop_rect=None):
-    text_candidate_buckets =[]
-    for textline in textlines:
-        textline_text_candidates = []
-
-        for cc in ccs:
-            if belongs_to_textline(img,cc,textline):
-                textline_text_candidates.append(cc)
-
-            # elif is_small_textline_character(roi,cc,mean_character_area,text_line):
-            #     if cc not in textline_text_candidates: #avoid doubling
-            #         textline_text_candidates.append(cc)
-
-        textline_text_candidates = filter_distant_text_character(textline_text_candidates)
-        # print(f'text_line text cands: {textline_text_candidates}')
-        if transform_from_crop:
-            textline_text_candidates = transform_panel_coordinates_to_expanded_rect(
-                crop_rect, Rect(0,0,0,0), textline_text_candidates) #Relative only so a placeholder Rect is the input
-
-        if textline_text_candidates: #If there are any candidates
-            textline.connected_components = textline_text_candidates
-            # print(f'components: {text_line.connected_components}')
-            text_candidate_buckets.append(textline)
-
-    return text_candidate_buckets
+# def assign_characters_to_textlines(img, textlines, ccs, transform_from_crop=False, crop_rect=None):
+#     text_candidate_buckets =[]
+#     for textline in textlines:
+#         textline_text_candidates = []
+#
+#         for cc in ccs:
+#             if belongs_to_textline(img,cc,textline):
+#                 textline_text_candidates.append(cc)
+#
+#             # elif is_small_textline_character(roi,cc,mean_character_area,text_line):
+#             #     if cc not in textline_text_candidates: #avoid doubling
+#             #         textline_text_candidates.append(cc)
+#
+#         textline_text_candidates = filter_distant_text_character(textline_text_candidates)
+#         # print(f'text_line text cands: {textline_text_candidates}')
+#         if transform_from_crop:
+#             textline_text_candidates = transform_panel_coordinates_to_expanded_rect(
+#                 crop_rect, Rect(0,0,0,0), textline_text_candidates) #Relative only so a placeholder Rect is the input
+#
+#         if textline_text_candidates: #If there are any candidates
+#             textline.connected_components = textline_text_candidates
+#             # print(f'components: {text_line.connected_components}')
+#             text_candidate_buckets.append(textline)
+#
+#     return text_candidate_buckets
 
 
 def assign_characters_proximity_search(img, chars_to_assign, textlines):
@@ -940,7 +918,7 @@ def filter_distant_text_character(ccs):
 def attempt_assign_small_to_nearest_text_element(fig, cc, mean_character_area, small_cc=True):
     """
     Crops `fig.img` and does a simple proximity search to determine the closest character.
-    :param Figure fig: figure object containing image with the cc panel
+    :param Figure fig: figure object containing image with the cc _panel
     :param Panel cc: unassigned connected component
     :param float mean_character_area: average area of character in the main crop
     :return: tuple (cc, nearest_neighbour) if close enough, else return None (inconclusive search)
@@ -983,3 +961,19 @@ def attempt_assign_small_to_nearest_text_element(fig, cc, mean_character_area, s
 
     else:
         return None
+
+
+def clear_conditions_region(fig):
+    """Removes connected components belonging to conditions and denoises the figure afterwards
+
+    :param Figure fig: Analysed figure
+    :return: new Figure object with conditions regions erased"""
+
+    fig_no_cond = erase_elements(fig, [cc for cc in fig.connected_components
+                                       if cc.role == FigureRoleEnum.ARROW or cc.role == FigureRoleEnum.CONDITIONSCHAR])
+
+    area_threshold = fig.get_bounding_box().area / 30000
+    # width_threshold = fig.get_bounding_box().width / 200
+    noise = [panel for panel in fig_no_cond.connected_components if panel.area < area_threshold]
+
+    return erase_elements(fig_no_cond, noise)

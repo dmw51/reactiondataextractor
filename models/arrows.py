@@ -9,12 +9,13 @@ from itertools import product
 
 from models.utils import Point
 from models.exceptions import NotAnArrowException
+from models.segments import PanelMethodsMixin
 
 log = logging.getLogger('extract.actions.arrows')
 # log.setLevel('WARNING')
 
 
-class BaseArrow():
+class BaseArrow(PanelMethodsMixin):
     """Base arrow class common to all arrows"""
 
     def __init__(self, pixels, line, panel):
@@ -24,29 +25,18 @@ class BaseArrow():
             self.pixels = pixels
 
         self.line = line
-        self.panel = panel
-
+        self._panel = panel
         slope = self.line.slope
-        self.is_vertical = True if slope == np.inf or abs(slope) > 10 else False
         self.sort_pixels()
-
         self._center_px = None
 
     @property
-    def left(self):
-        return self.panel.left
+    def panel(self):
+        return self._panel
 
     @property
-    def right(self):
-        return self.panel.right
-
-    @property
-    def top(self):
-        return self.panel.top
-
-    @property
-    def bottom(self):
-        return self.panel.bottom
+    def is_vertical(self):
+        return self.line.is_vertical
 
     @property
     def center_px(self):
@@ -82,6 +72,12 @@ class BaseArrow():
         return self._center_px
 
     def sort_pixels(self):
+        """
+        Simple pixel sort.
+
+        Sorts pixels by row in vertical arrows and by column in all other arrows
+        :return:
+        """
         if self.is_vertical:
             self.pixels.sort(key=lambda pixel: pixel.row)
         else:
@@ -103,12 +99,14 @@ class SolidArrow(BaseArrow):
         pixel_majority = len(self.prod_side) - len(self.react_side)
         # print(f'pixel majority: {pixel_majority}')
         num_pixels = len(self.pixels)
-        min_pixels = min(int(0.1 * num_pixels), 20)
+        min_pixels = min(int(0.1 * num_pixels), 15)
         if pixel_majority < min_pixels:
             raise NotAnArrowException('insufficient pixel majority')
         elif pixel_majority < 2 * min_pixels:
             log.warning('Difficulty detecting arrow sides - low pixel majority')
 
+        if self.line.slope == 0 and self.panel.aspect_ratio < 4:
+            raise NotAnArrowException('the aspect ratio is too low')
         log.info('Arrow accepted!')
 
     def __repr__(self):
@@ -119,6 +117,18 @@ class SolidArrow(BaseArrow):
 
     def __hash__(self):
         return hash(pixel for pixel in self.pixels)
+
+    @property
+    def hook(self):
+        """
+        Returns the last pixel of an arrow hook.
+        :return:
+        """
+        if self.is_vertical:
+            prod_side_lhs = True if self.prod_side[0].row < self.react_side[0].row else False
+        else:
+            prod_side_lhs = True if self.prod_side[0].col < self.react_side[0].col else False
+        return self.prod_side[0] if prod_side_lhs else self.prod_side[-1]
 
     def get_direction(self):
         center_px = self.center_px
@@ -149,6 +159,4 @@ class SolidArrow(BaseArrow):
         log.debug('Number of pixel on reactants side: %s ', len(react_side))
         log.debug('product side: %s ', len(prod_side))
         return react_side, prod_side
-
-
 

@@ -4,7 +4,7 @@ from __future__ import print_function
 from __future__ import unicode_literals
 import logging
 
-from models.segments import Panel
+from models.segments import Panel, PanelMethodsMixin
 
 log = logging.getLogger(__name__)
 
@@ -15,20 +15,78 @@ class BaseReactionClass(object):
     """
 
 
-class ChemicalStructure(BaseReactionClass):
-    """
-    This is a base class for chemical structures species found in diagrams (e.g. reactants and products)
-    """
-    def __init__(self, panel):
-        self.panel = panel
-        self.smiles = None
-        self.label = None
+class Diagram(BaseReactionClass, PanelMethodsMixin):
+    """This is a base class for chemical structures species found in diagrams (e.g. reactants and products)"""
 
-    # def __iter__(self):
-    #     return iter(self.panel)
+    @classmethod
+    def from_coords(cls, left, right, top, bottom, label=None, smiles=None, crop=None):
+        """Class method used for instantiation from coordinates, as used within chemschematicresolver"""
+        panel = Panel(left, right, top, bottom)
+        return cls(panel=panel, label=label, smiles=smiles, crop=crop)
+
+
+    def __init__(self, panel, label=None, smiles=None, crop=None):
+        self._panel = panel
+        self._label = label
+        self._smiles = smiles
+        self._crop = crop
+        super().__init__()
+
+    @property
+    def panel(self):
+        return self._panel
+
+    @property
+    def center(self):
+        return self._panel.center
+
+    @property
+    def label(self):
+        return self._label
+
+    @label.setter
+    def label(self, label):
+        self._label = label
+
+    @property
+    def smiles(self):
+        return self._smiles
+
+    @smiles.setter
+    def smiles(self, smiles):
+        self._smiles = smiles
+
+    @property
+    def crop(self):
+        """ Cropped Figure object of the specific diagram"""
+        return self._crop
+
+    @crop.setter
+    def crop(self, fig):
+        self._crop = fig
+
+    def compass_position(self, other):
+        """ Determines the compass position (NSEW) of other relative to self"""
+
+        length = other.center[0] - self.center[0]
+        height = other.center[1] - self.center[1]
+
+        if abs(length) > abs(height):
+            if length > 0:
+                return 'E'
+            else:
+                return 'W'
+        elif abs(length) < abs(height):
+            if height > 0:
+                return 'S'
+            else:
+                return 'N'
+
+        else:
+            return None
 
     def __eq__(self, other):
-        if isinstance(other, ChemicalStructure):   # Only compare exact same types
+        if isinstance(other, Diagram):   # Only compare exact same types
             return self.panel == other.panel and self.label == other.label and self.smiles == other.smiles
 
     def __hash__(self):
@@ -39,6 +97,7 @@ class ChemicalStructure(BaseReactionClass):
 
     def __str__(self):
         return f'{self.smiles}, label: {self.smiles}'
+
 
 class ReactionStep(BaseReactionClass):
     """
@@ -115,10 +174,15 @@ class Conditions:
     This class describes conditions region and associated text
     """
 
-    def __init__(self, text_lines, conditions_dct, arrow):
+    def __init__(self, text_lines, conditions_dct, arrow, structure_panels=None):
         self.arrow = arrow
         self.text_lines = text_lines
         self.conditions_dct = conditions_dct
+
+        if structure_panels is None:
+            structure_panels = []
+        self.structure_panels = structure_panels
+
         self.text_lines.sort(key=lambda textline: textline.panel.top)
 
     def __repr__(self):
@@ -173,6 +237,32 @@ class Conditions:
         return self.conditions_dct['yield']
 
 
+class Label(PanelMethodsMixin):
+    # Should this be just a named tuple?
+    """Describes labels and recgonised text"""
 
+    @classmethod
+    def from_coords(cls, left, right, top, bottom, text):
+        panel = Panel(left, right, top, bottom)
+        return cls(panel, text)
 
-#
+    def __init__(self, panel, text=[], r_group=[]):
+        self._panel = panel
+        self._text = text
+        self.r_group = r_group
+    @property
+    def panel(self):
+        return self._panel
+
+    @property
+    def text(self):
+        return self._text
+
+    @text.setter
+    def text(self, value):
+        self._text = value
+
+    def add_r_group_variables(self, var_value_label_tuples):
+        """ Updates the R-groups for this label."""
+
+        self.r_group.append(var_value_label_tuples)

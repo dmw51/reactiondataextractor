@@ -14,11 +14,13 @@ from PIL import Image, ImageOps
 
 from actions import (detect_structures, find_arrows, get_conditions_smiles, complete_structures,
                      remove_redundant_characters, find_optimal_dilation_ksize, scan_form_reaction_step)
-from conditions import get_conditions
-from models.segments import FigureRoleEnum
+from conditions import get_conditions, clear_conditions_region
+from models.segments import FigureRoleEnum, ReactionRoleEnum
 from models.output import ReactionScheme
 from utils.io_ import imread
 from utils.processing import erase_elements
+from resolve import LabelAssigner, RGroupResolver
+from recognise import DiagramRecogniser
 import chemschematicresolver as csr
 import settings
 
@@ -49,6 +51,7 @@ def extract_image(filename, debug=False):
 
     MAIN_DIR = os.getcwd()
     path = os.path.join(MAIN_DIR, filename)
+    log.info(f'Extracting file: {path}')
 
     fig = imread(path)
     settings.main_figure.append(fig)
@@ -61,30 +64,41 @@ def extract_image(filename, debug=False):
     log.info('Detected %d arrows' % len(arrows))
 
     structure_panels = complete_structures(fig)
-    log.info('Found %d structure panels' % len(structure_panels))
-
-    conditions = [get_conditions(fig, arrow) for arrow in arrows]
+    conditions, conditions_structures = zip(*[get_conditions(fig, arrow) for arrow in arrows])
+    conditions_structures = [panel for step_panels in conditions_structures for panel in step_panels]
+    [setattr(structure, 'role', ReactionRoleEnum.CONDITIONS) for structure in structure_panels
+     if structure in conditions_structures]
+    react_prod_structures = [panel for panel in structure_panels if panel not in conditions_structures]
     for step_conditions in conditions:
         log.info('Conditions dictionary found: %s' % step_conditions.conditions_dct)
 
-    fig_no_cond = erase_elements(fig, [cc for cc in fig.connected_components
-                                       if cc.role == FigureRoleEnum.ARROW or cc.role == FigureRoleEnum.CONDITIONSCHAR])
-    fig_clean = remove_redundant_characters(fig_no_cond, fig_no_cond.connected_components)
-    processed = Image.fromarray(fig_clean.img).convert('RGB')
+    fig_no_cond = clear_conditions_region(fig)
+
+
+    log.info('Found %d structure panels' % len(structure_panels))
+
+
+    # fig_clean = remove_redundant_characters(fig_no_cond, fig_no_cond.connected_components)
+    processed = Image.fromarray(fig_no_cond.img).convert('RGB')
     processed = ImageOps.invert(processed)
 
-    segmented_filepath = MAIN_DIR + '/processed' + '.tif'
-    processed.save(segmented_filepath)
+    # segmented_filepath = MAIN_DIR + '/processed' + '.tif'
+    # processed.save(segmented_filepath)
+    assigner = LabelAssigner(fig_no_cond, react_prod_structures, conditions_structures)
+    diags = assigner.create_diagrams()
 
+    resolver = RGroupResolver(diags)
+    resolver.analyse_labels()
+
+    recogniser = DiagramRecogniser(diags)
+    recogniser.recognise_diagrams()
     log.debug('Cleaned image sent to the structure-label resolution model')
-    csr_out = csr.extract_image_rde(MAIN_DIR + '/processed.tif', kernel_size=fig.kernel_size, debug=True,
-                                    allow_wildcards=False)
-    log.info('CSR found the following species: %s' % csr_out[0])
-    conditions = get_conditions_smiles(csr_out, conditions)
-    os.remove(segmented_filepath)
+    # csr_out = csr.extract_image_rde(MAIN_DIR + '/processed.tif', kernel_sizes=fig.kernel_sizes, debug=True,
+    #                                 allow_wildcards=False)
+    # log.info('CSR found the following species: %s' % csr_out[0])
+    # conditions = get_conditions_smiles(csr_out, conditions)
 
-    steps = [scan_form_reaction_step(step_conditions, structure_panels) for step_conditions in conditions]
-    [step.match_function_and_smiles(csr_out) for step in steps]
+    steps = [scan_form_reaction_step(step_conditions, diags) for step_conditions in conditions]
     log.info('SMILES-structure matching complete.')
     if debug:
         colors = ['r', 'g', 'y', 'm', 'b', 'c', 'k']
@@ -100,13 +114,23 @@ def extract_image(filename, debug=False):
             rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
                                   facecolor='none', edgecolor=color)
             ax.add_patch(rect_bbox)
-        for step in steps:
-            for group in step:
-                for species in group:
-                    panel = species.panel
-                    rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
-                                          facecolor='none', edgecolor='m')
-                    ax.add_patch(rect_bbox)
+        ax.set_title('Roles')
+        plt.show()
+
+        f = plt.figure()
+        ax = f.add_axes([0.1, 0.1, 0.9, .9])
+        ax.imshow(fig.img)
+        for diag in diags:
+            panel = diag.panel
+            rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+                                  facecolor='none', edgecolor='m')
+            ax.add_patch(rect_bbox)
+            if diag.label:
+                panel = diag.label.panel
+                rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+                                      facecolor='none', edgecolor='g')
+                ax.add_patch(rect_bbox)
+        ax.set_title('Diagrams and labels')
         plt.show()
 
     scheme = ReactionScheme(steps)
@@ -114,3 +138,5 @@ def extract_image(filename, debug=False):
 
     settings.main_figure = []
     return scheme
+
+print()

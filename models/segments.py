@@ -27,6 +27,7 @@ from __future__ import unicode_literals
 
 from collections.abc import Collection
 from enum import Enum
+from functools import wraps
 import logging
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -37,7 +38,7 @@ from itertools import product
 import numpy as np
 import scipy.ndimage as ndi
 from skimage.measure import regionprops
-from skimage.color import rgb2gray
+from skimage.util import pad
 from models.utils import Line, Point
 import settings
 
@@ -71,8 +72,66 @@ class ReactionRoleEnum(Enum):
     ARROW = 1
     CONDITIONS = 2
     LABEL = 4
+    GENERIC_STRUCTURE_DIAGRAM = 5
     STEP_REACTANT = 9
     STEP_PRODUCT = 10
+
+
+# class CoordsDeco:
+#     """ Adds ''left'', ''right'' etc. properties to classes with ''panel'' attributes"""
+#     def __init__(self, cls):
+#         self.cls = cls
+#
+#     def __call__(self, *args, **kwargs):
+#         self.cls.__init__(*args, **kwargs)
+#         if hasattr(self.cls, 'panel'):
+#             left = lambda self: self.panel.left
+#             left = property(left)
+#             right = lambda self: self.panel.right
+#             right = property(right)
+#             top = lambda self: self.panel.top
+#             top = property(top)
+#             bottom = lambda self: self.panel.bottom
+#             bottom = property(bottom)
+#         return cls
+
+def coords_deco(cls):
+    for coord in ['left', 'right', 'top', 'bottom']:
+        def fget(self, coord=coord):
+            panel = getattr(self, 'panel')
+            return getattr(panel, coord)
+        prop = property(fget)
+        setattr(cls, coord, prop)
+
+    @wraps(cls)
+    def wrapper(*args, **kwargs):
+        return cls(*args, **kwargs)
+
+    return wrapper
+
+
+class PanelMethodsMixin:
+    """If an attribute is not found in the usual places, try to look it up inside ``panel`` attribute"""
+    def __getattr__(self, item):
+        return self.panel.__getattribute__(item)
+
+
+
+# def panel_method_deco(method_names):
+#     def deco(cls):
+#         for method in method_names:
+#             def fget(self, method=method):
+#                 panel = getattr(self, 'panel')
+#                 return getattr(panel, method)
+#             prop = property(fget)
+#             setattr(cls, method, prop)
+#
+#         @wraps(cls)
+#         def wrapper(*args, **kwargs):
+#             return cls(*args, **kwargs)
+#
+#         return wrapper
+#     return deco
 
 
 class Rect(object):
@@ -214,11 +273,17 @@ class Rect(object):
         else:
             return False
 
+    def __call__(self):
+        return (self.left, self.right, self.top, self.bottom)
+
     def __iter__(self):
         return iter([self.left, self.right, self.top, self.bottom])
 
     def __hash__(self):
         return hash((self.left, self.right, self.top, self.bottom))
+
+    def to_json(self):
+        return f"[{', '.join(map(str, self()))}]"
 
     def contains(self, other_rect):
         """Return true if ``other_rect`` is within this rect.
@@ -253,6 +318,9 @@ class Rect(object):
         :return: Distance between centoids of rectangle
         :rtype: float
         """
+        if hasattr(other, 'panel'):
+            other = other.panel
+
         if isinstance(other, Rect):
             y = other.center[1]
             x = other.center[0]
@@ -260,6 +328,7 @@ class Rect(object):
             y = other.row
             x = other.col
         else:
+            x, y = other
             print(f'other: {type(other)}')
         height = abs(self.center[0] - x)
         length = abs(self.center[1] - y)
@@ -275,6 +344,12 @@ class Rect(object):
 
     def create_crop(self, figure):
         return Crop(figure, self)
+
+    def create_padded_crop(self, figure, pad_width=(10,10), pad_val=0):
+        crop = self.create_crop(figure)
+        img = pad(crop.img, pad_width=pad_width, constant_values=pad_val)
+        dummy_fig = Figure(img, img)
+        return Crop(dummy_fig, Rect(0, dummy_fig.width, 0, dummy_fig.height))
 
 class Panel(Rect):
     """ Tagged section inside Figure"""
@@ -300,7 +375,7 @@ class Panel(Rect):
     #     if self._role is None:
     #         self._role = value
     #     else:
-    #         raise AttributeError('Role of a panel can only be set once!')
+    #         raise AttributeError('Role of a _panel can only be set once!')
 
 
 
@@ -339,7 +414,7 @@ class Figure(object):
         """
         self.img = img
         self.raw_img = raw_img
-        self.kernel_size = None
+        self.kernel_sizes = None
         self.boundary_length = None
 
 
@@ -367,11 +442,11 @@ class Figure(object):
     def diagonal(self):
         return np.hypot(self.width, self.height)
 
-    @property
-    def backbones(self):
-        if self._backbones is None:
-            self.detect_structures()
-        return self._backbones
+    # @property
+    # def backbones(self):
+    #     if self._backbones is None:
+    #         self.detect_structures()
+    #     return self._backbones
 
     def get_bounding_box(self):
         """ Returns the Panel object for the extreme bounding box of the image
@@ -406,8 +481,8 @@ class Figure(object):
     #     ax.imshow(self.img)
     #
     #     backbones = [cc for cc in self.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
-    #     for panel in backbones:
-    #         rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
+    #     for _panel in backbones:
+    #         rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right - _panel.left, _panel.bottom - _panel.top,
     #                               facecolor='none', edgecolor='m')
     #         ax.add_patch(rect_bbox)
     #     plt.show()
@@ -436,7 +511,7 @@ class Crop:
         self.crop_params = crop_params  # (left, right, top, bottom) of the intended crop or Rect() with these attribs
 
         self.cropped_rect = None  # Actual reactangle that was used for the crop - accounting for the boundaries in ``main_figure``
-        self.img = None  # np.ndarray
+        self._img = None  # np.ndarray
         self.raw_img = None
         self.crop_main_figure()
         self.get_connected_components()
@@ -444,6 +519,16 @@ class Crop:
     def __eq__(self, other):
         return self.main_figure == other.main_figure and self.crop_params == other.crop_params\
                and self.cropped_img == other.cropped_img
+
+    # @property
+    # def img(self):
+    #     return self._img
+    #
+    # @img.setter
+    # def img(self, value):
+    #     self._img = value
+    #     if hasattr(self, 'padding'):
+    #         self.get_connected_components()
 
     def in_main_fig(self, element):
         """
@@ -469,6 +554,7 @@ class Crop:
         Transforms coordinates of ''cc'' (from ``self.main_figure.connected_components``) to give coordinates of the
         corresponding cc within a crop. Returns a new  object
         :param Panel cc: connected component to transform
+
         :return: Panel object with new in-crop attributes
         """
         new_top = cc.top - self.cropped_rect.top
@@ -530,7 +616,7 @@ class Crop:
         self.img = out_img
         self.raw_img = out_raw_img
 
-
+@coords_deco
 class TextLine:
 
     """
@@ -553,11 +639,11 @@ class TextLine:
         # self.find_text() # will be used to find text from `connected_components`
 
     def __repr__(self):
-        left = self.panel.left
-        right = self.panel.right
-        top = self.panel.top
-        bottom = self.panel.bottom
-        return f'TextLine(left={left}, right={right}, top={top}, bottom={bottom})'
+        # left = self.panel.left
+        # right = self.panel.right
+        # top = self.panel.top
+        # bottom = self.panel.bottom
+        return f'TextLine(left={self.left}, right={self.right}, top={self.top}, bottom={self.bottom})'
 
     def __iter__(self):
         return iter(self.connected_components)
@@ -566,11 +652,11 @@ class TextLine:
         return item in self.connected_components
 
     def __hash__(self):
-        left = self.panel.left
-        right = self.panel.right
-        top = self.panel.top
-        bottom = self.panel.bottom
-        return hash(left + right + top + bottom)
+        # left = self.panel.left
+        # right = self.panel.right
+        # top = self.panel.top
+        # bottom = self.panel.bottom
+        return hash(self.left + self.right + self.top + self.bottom)
 
     @property
     def height(self):
@@ -651,19 +737,11 @@ class TextLine:
     #     mean_area = np.mean([cc.area for cc in ccs])
     #     for cc in ccs:
     #         if cc.area > 0.4 * mean_area:  # Exclude dots, commas etc
-    #             if cc.bottom == self.panel.bottom:
+    #             if cc.bottom == self._panel.bottom:
     #                 self.anchor = Point(cc.center[1], cc.center[0])
     #                 break
-    #             elif cc.top == self.panel.top:
+    #             elif cc.top == self._panel.top:
     #                 self.anchor = Point(cc.center[1], cc.center[0])
     #                 break
     #     if not self.anchor:
     #         raise AnchorNotFoundException('A text line could not be anchored')
-
-
-
-
-
-
-
-

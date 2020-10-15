@@ -14,10 +14,11 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import DBSCAN
 
 
+
 from models.arrows import SolidArrow
 from models.exceptions import NotAnArrowException, NoArrowsFoundException
-from models.reaction import ReactionStep, Conditions, ChemicalStructure
-from models.segments import Rect, Panel, Figure, FigureRoleEnum, ReactionRoleEnum
+from models.reaction import ReactionStep, Conditions, Diagram
+from models.segments import Rect, Panel, Figure, FigureRoleEnum, ReactionRoleEnum, Crop
 from models.utils import Point, Line
 from utils.processing import approximate_line, pixel_ratio, binary_close, binary_floodfill, dilate_fragments
 from utils.processing import (binary_tag, get_bounding_box, erase_elements,
@@ -87,7 +88,7 @@ def segment(bin_fig, arrows):
         closed_fig = binary_close(bin_fig, size=kernel)
         log.debug("Segmentation kernel size = %s" % kernel)
 
-    # Using a binary floodfill to identify panel regions
+    # Using a binary floodfill to identify _panel regions
     fill_img = binary_floodfill(closed_fig)
     tag_img = binary_tag(fill_img)
     panels = get_bounding_box(tag_img)
@@ -102,37 +103,38 @@ def segment(bin_fig, arrows):
 def find_optimal_dilation_ksize(fig=None):
     """
     Use structural backbones to calculate local skeletonised-pixel ratio and find optimal dilation kernel size for
-    structural segmentation.
+    structural segmentation. Each backbone is assigned its own dilation kernel to account for varying skel-pixel ratio
+    around different backbones
     :param Figure fig: Analysed Figure object containing marked structural backbones if its ``connected_components``
     attribute
-    :return int: optimal kernel size
+    :return dict: kernel sizes appropriate for each backbone
     """
     if fig is None:
         fig = settings.main_figure[0]
 
     backbones = [cc for cc in fig.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
 
-    p_ratios = []
+    kernel_sizes = {}
     for backbone in backbones:
         left, right, top, bottom = backbone
         crop_rect = Rect(left-50, right+50, top-50, bottom+50)
         p_ratio = skeletonize_area_ratio(fig, crop_rect)
         log.debug(f'found in-crop skel_pixel ratio: {p_ratio}')
 
-        p_ratios.append(p_ratio)
+        kernel_size = 4
+        # mean_p_ratio = np.mean(p_ratios)
+        if 0.016 < p_ratio < 0.02:
+            kernel_size += 4
+        elif 0.01 < p_ratio < 0.016:
+            kernel_size += 8
+        elif p_ratio < 0.01:
+            kernel_size += 12
 
-    kernel_size = 4
-    mean_p_ratio = np.mean(p_ratios)
-    if 0.016 < mean_p_ratio < 0.02:
-        kernel_size += 4
-    elif 0.01 < mean_p_ratio < 0.016:
-        kernel_size += 8
-    elif mean_p_ratio < 0.01:
-        kernel_size += 12
-    log.info('Structure segmentation kernel: %d' % kernel_size)
+        kernel_sizes[backbone] = kernel_size
+        log.info(f'Structure segmentation kernels:{kernel_sizes.values()}')
 
-    fig.kernel_size = kernel_size
-    return kernel_size
+    fig.kernel_sizes = kernel_sizes
+    return kernel_sizes
 
 
 def skeletonize(fig):
@@ -150,7 +152,7 @@ def skeletonize(fig):
 def skeletonize_area_ratio(fig, panel):
     """ Calculates the ratio of skeletonized image pixels to total number of pixels
     :param fig: Input figure
-    :param panel: Original panel object
+    :param panel: Original _panel object
     :return: Float : Ratio of skeletonized pixels to total area (see pixel_ratio)
     """
 
@@ -192,6 +194,10 @@ def find_solid_arrows(fig, threshold, min_arrow_length):
     skeletonized = skeletonize(fig)
     all_lines = probabilistic_hough_line(skeletonized.img, threshold=threshold, line_length=min_arrow_length, line_gap=3)
     for line in all_lines:
+        # for line in all_lines:
+        #     x, y = zip(*line)
+        #     if abs(x[0] - x[1]) > 100:
+        #         print('im the one')
         # isolated_fig = skeletonize(isolate_patches(fig, [cc]))
         # cc_lines = probabilistic_hough_line(fig.img, threshold=threshold, line_length=min_arrow_length, line_gap=3)
         # if len(cc_lines) > 1:
@@ -292,41 +298,67 @@ def complete_structures(fig: Figure):
     """
 
     backbones = [cc for cc in fig.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
-    dilated_structure_panels, dilated_other = dilate_group_panels(fig, backbones)
-
+    # dilated_structure_panels, dilated_other = dilate_group_panels(fig, backbones)
+    dilated_structure_panels, other_ccs = find_dilated_structures(fig, backbones)
     structure_panels = _complete_structures(fig, dilated_structure_panels)
-    _assign_backbone_auxiliaries(fig, (dilated_structure_panels, dilated_other), structure_panels)  # Assigns cc roles
+    _assign_backbone_auxiliaries(fig, (dilated_structure_panels, other_ccs), structure_panels)  # Assigns cc roles
+    # settings.main_figure[0] = fig   # This is an awful way to do it, losing conditions info (look at input fig)
+    # # Need to somehow disentangle the different versions of ``fig`` - roles needed for later
 
     return structure_panels
 
 
-def dilate_group_panels(fig, backbones):
+
+def find_dilated_structures(fig, backbones):
     """
-    Dilates ``fig`` and separates found connected components into dilated structures and other non-structural ccs.
-    The separation is done on the basis of comparison with original backbones.
+    Finds dilated structures by first dilating the image several times using backbone-specific kernel size.
+
+    For each backbone, the figure is dilated using a backbone-specific kernel size. Dilated structure panel is then
+    found based on comparison with the original backbone. A crop is made for each structure. If there are more than
+    one connected component (the structure panel itself), e.g. a label, then this is noted and
+    used later for role assignment.
     :param Figure fig: Analysed figure
     :param [Panel,...] backbones: Collection of panels containing structural backbones
-    :return: (dilated_structure_panels, non_structures) pair of collections containing the separated ccs
+    :return: (dilated_structure_panels, other_ccs) pair of collections containing the dilated panels and separate ccs
+    present within these dilated panels
     """
-
-    dilated = dilate_fragments(fig, fig.kernel_size)
-
     dilated_structure_panels = []
-    non_structures = []
-    for cc in dilated.connected_components:
-        if any(cc.contains(backbone) for backbone in backbones):
-            dilated_structure_panels.append(cc)
-        else:
-            non_structures.append(cc)
+    other_ccs = []
+    dilated_imgs = {}
 
-    return dilated_structure_panels, non_structures
+    for backbone in backbones:
+        ksize = fig.kernel_sizes[backbone]
+        try:
+            dilated_temp = dilated_imgs[ksize]
+        except KeyError:
+            dilated_temp = dilate_fragments(fig, ksize)
+            dilated_imgs[ksize] = dilated_temp
+        dilated_structure_panel = [cc for cc in dilated_temp.connected_components if cc.contains(backbone)][0]
 
+        structure_crop = Crop(dilated_temp, dilated_structure_panel())
+        other = [structure_crop.in_main_fig(c) for c in structure_crop.connected_components if structure_crop.in_main_fig(c) != dilated_structure_panel]
+        other_ccs.extend(other)
+        dilated_structure_panels.append(dilated_structure_panel)
 
-def scan_form_reaction_step(conditions, structure_ccs):
+    return dilated_structure_panels, other_ccs
+    # dilated = dilate_fragments(fig, fig.kernel_sizes)
+    #
+    # dilated_structure_panels = []
+    # non_structures = []
+    # for cc in dilated.connected_components:
+    #     if any(cc.contains(backbone) for backbone in backbones):
+    #         dilated_structure_panels.append(cc)
+    #     else:
+    #         non_structures.append(cc)
+
+    # return dilated_structure_panels, non_structures
+    # return dilated_structure_panels
+
+def scan_form_reaction_step(conditions, diags):
     """
     Scans an image around a single arrow to give reactants and products in a single reaction step
     :param Conditions conditions: Conditions object containing ``arrow`` around which the scan is performed
-    :param [Panel,...] structure_ccs: collection of all detected structures
+    :param [Diagram,...] diags: collection of all detected and recognised diagrams
     :return: a ReactionStep object
     """
     arrow = conditions.arrow
@@ -338,22 +370,74 @@ def scan_form_reaction_step(conditions, structure_ccs):
     else:
         react_endpoint, prod_endpoint = endpoint2, endpoint1
 
-    initial_distance = 1.25 * np.sqrt(np.mean([cc.area for cc in structure_ccs]))
-    reactants = find_nearby_ccs(react_endpoint, structure_ccs, (initial_distance, lambda cc: 1.5*np.sqrt(cc.area)))
-    reactants = [ChemicalStructure(reactant) for reactant in reactants]
+    initial_distance = 1.25 * np.sqrt(np.mean([diag.panel.area for diag in diags]))
+    distance_fn = lambda diag: 1.5*np.sqrt(diag.panel.area)
+    distances = initial_distance, distance_fn
+    reactants = find_nearby_ccs(react_endpoint, diags, distances,
+                                condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
+    if not reactants:
+        reactants = search_elsewhere('up-right', diags, conditions.arrow,  distances)
 
-    products = find_nearby_ccs(prod_endpoint, structure_ccs, (initial_distance, lambda cc: 1.5*np.sqrt(cc.area)))
-    products = [ChemicalStructure(product) for product in products]
+
+    products = find_nearby_ccs(prod_endpoint, diags, distances,
+                               condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
+    if not products:
+        products = search_elsewhere('down-left', diags, conditions.arrow, distances)
     return ReactionStep(reactants, products, conditions=conditions)
 
 
-def _complete_structures(fig, dilated_structure_panels):
+def search_elsewhere(where, diags, arrow, distances):
     """
-    Dilates structural backbones to find full structures (backbones + superatoms + multiple/hashed bonds).
+    Looks for structures in a different line of a multi-line reaction scheme.
 
-    For each of the ``backbones`` assign all relevant auxiliary connected components in ``fig``
-    to give complete chemical structures. This function returns the structures AND modifies roles of
-    the auxiliary connected components.
+    Assumes left-to-right reaction scheme. Estimates the optimal alternative search point using arrow and structures'
+    coordinates. Performs a seach in the new spot.
+    :param str where: Allows either 'down-left' to look below and to the left of arrow, or 'up-right' (above to the right)
+    :param [Diagram,...]: Sequence of Diagram objects
+    :param Arrow arrow: Original arrow, around which the search failed
+    :param (float, lambda) distances: pair containing initial search distance and a distance function (usually same as
+    in the parent function)
+    :return: Collection of found species
+    """
+    assert where in ['down-left', 'up-right']
+    fig = settings.main_figure[0]
+
+    X = np.array([s.center[1] for s in diags] + [arrow.panel.center[1]]).reshape(-1, 1)  # the y-coordinate
+    eps = np.mean([s.height for s in diags])
+    dbscan = DBSCAN(eps=eps, min_samples=2)
+    y = dbscan.fit_predict(X)
+    num_labels = max(y) - min(y) + 1 # include outliers (label -1) if any
+    arrow_label = y[-1]
+    clustered = []
+    for val in range(-1, num_labels):
+        if val == arrow_label:
+            continue  # discard this cluster - want to compare the arrow with other clusters only
+        cluster = [centre for centre, label in zip (X, y) if label == val]
+        if cluster:
+            clustered.append(cluster)
+    centres = [np.mean(cluster) for cluster in clustered]
+    centres.sort()
+    if where == 'down-left':
+        move_to_vertical = [centre for centre in centres if centre > arrow.panel.center[1]][0]
+        move_to_horizontal = np.mean([structure.width for structure in diags])
+    elif where == 'up-right':
+        move_to_vertical = [centre for centre in centres if centre < arrow.panel.center[1]][-1]
+        move_to_horizontal = fig.img.shape[1] - np.mean([structure.width for structure in diags])
+    else:
+        raise ValueError("'where' takes in one of two values : ('down-left', 'up-right') only")
+    species = find_nearby_ccs(Point(move_to_vertical, move_to_horizontal), diags, distances)
+
+    return species
+
+
+
+
+def _complete_structures(fig, dilated_structure_panels):
+    """Uses ``dilated_structure_panels`` to find all constituent ccs of each chemical structure.
+
+    Finds connected components belonging to a chemical structure and creates a large panel out of them. This effectively
+    normalises panel sizes with respect to chosen dilation kernel sizes. Also sets the structure panel as the
+    ``parent_panel`` of appropriate backbones
     :param Figure fig: Analysed figure
     :return: collection of Panels delineating complete chemical structures
     """
@@ -369,24 +453,24 @@ def _complete_structures(fig, dilated_structure_panels):
         constituent_ccs = [cc for cc in fig.connected_components if dilated_structure.contains(cc)]
         parent_structure_panel = create_megabox(constituent_ccs)
         structure_panels.append(parent_structure_panel)
-        backbone = [cc for cc in constituent_ccs if cc.role == FigureRoleEnum.STRUCTUREBACKBONE][0]
-        setattr(backbone, 'parent_panel', parent_structure_panel)
+        # backbone = [cc for cc in constituent_ccs if cc.role == FigureRoleEnum.STRUCTUREBACKBONE][0]
+        #
 
 
 
     # f = plt.figure()
     # ax = f.add_axes([0,0,1,1])
     # ax.imshow(fig.img)
-    # for panel in structure_panels:
-    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
+    # for _panel in structure_panels:
+    #     rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left, _panel.bottom-_panel.top, facecolor='none',edgecolor='r')
     #     ax.add_patch(rect_bbox)
     # plt.show()
     #
     # f = plt.figure()
     # ax = f.add_axes([0,0,1,1])
     # ax.imshow(dilated.img)
-    # for panel in structure_panels:
-    #     rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor='r')
+    # for _panel in structure_panels:
+    #     rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left, _panel.bottom-_panel.top, facecolor='none',edgecolor='r')
     #     ax.add_patch(rect_bbox)
     # plt.show()
     return structure_panels
@@ -395,7 +479,7 @@ def _complete_structures(fig, dilated_structure_panels):
 def _assign_backbone_auxiliaries(fig, dilated_panels, structure_panels):
     """
     Takes in the ``structure_panels`` to assign roles to structural auxiliaries (solitary
-    bondlines, superatom labels) found in ``figure`` based on comparison between each structure panel and its
+    bondlines, superatom labels) found in ``figure`` based on comparison between each structure _panel and its
     corresponding backbone in ``figure``.
     :param Figure fig: analysed figure
     :param tuple(dilated_structures, dilated,non_structures) dilated_panels: pair containing dilated ccs classified into
@@ -403,20 +487,20 @@ def _assign_backbone_auxiliaries(fig, dilated_panels, structure_panels):
     :return: None (mutates ''role'' attribute of each relevant connected component)
     """
     #TODO: Simplify/combine loops where appropriate to speed this up.
-    dilated_structure_panels, non_structures = dilated_panels
+    dilated_structure_panels, other_ccs = dilated_panels
     parent_panel_pairs = [(parent, dilated) for parent in structure_panels for dilated in dilated_structure_panels if
                           dilated.contains(parent)]
 
 
-    resolved = []
-    ambiguous = []
-    for structure in dilated_structure_panels:
-        disconnected_overlapping_ccs = [cc for cc in non_structures if structure.overlaps(cc)]
-        if disconnected_overlapping_ccs:
-            ambiguous.append((structure, disconnected_overlapping_ccs))
-        else:
-            resolved.append(structure)
-    log.debug('Found %d resolved and %d ambiguous structures.' % (len(resolved), len(ambiguous)))
+    # resolved = []
+    # ambiguous = []
+    # for structure in dilated_structure_panels:
+    #     disconnected_overlapping_ccs = [cc for cc in non_structures if structure.overlaps(cc)]
+    #     if disconnected_overlapping_ccs:
+    #         ambiguous.append((structure, disconnected_overlapping_ccs))
+    #     else:
+    #         resolved.append(structure)
+    # log.debug('Found %d resolved and %d ambiguous structures.' % (len(resolved), len(ambiguous)))
     # resolved = [structure for structure in dilated_structures if not any(structure.contains(cc)
     #                                                                      for cc in dilated.connected_components)]
     # ambiguous_structures = [(structure, [cc for cc in dilated.connected_components if structure.contains(cc)])
@@ -425,27 +509,40 @@ def _assign_backbone_auxiliaries(fig, dilated_panels, structure_panels):
     # [[setattr(auxiliary, 'role', FigureRoleEnum.STRUCTUREAUXILIARY) for auxiliary in fig.connected_components if
     #   resolved_structure.contains(auxiliary) and getattr(auxiliary, 'role') != FigureRoleEnum.STRUCTUREBACKBONE]
     #  for resolved_structure in resolved]
-
-    for structure in resolved:
+    for parent_panel in structure_panels:
         for cc in fig.connected_components:
-            if cc.role != FigureRoleEnum.STRUCTUREBACKBONE and structure.contains(cc):
-                setattr(cc, 'role', FigureRoleEnum.STRUCTUREAUXILIARY)
-                parent_panel = [parent for parent, dilated in parent_panel_pairs if dilated == structure][0]
+            if parent_panel.contains(cc): # Set the parent panel for all
                 setattr(cc, 'parent_panel', parent_panel)
-
-    for structure, disconnected_overlapping_ccs in ambiguous:
-        for cc in fig.connected_components:
-            if cc.role != FigureRoleEnum.STRUCTUREBACKBONE:
-                condition_1 = structure.contains(cc)
-                condition_2 = lambda overlapping_cc: overlapping_cc.contains(cc)
-
-                if condition_1 and not (
-                any(condition_2(overlapping_cc) for overlapping_cc in disconnected_overlapping_ccs)):
-                    # include cc that are contained within structure and are either very small (parts of hashed bonds)
-                    # or are glued to the structure in the dilated image
+                if cc.role != FigureRoleEnum.STRUCTUREBACKBONE:  # Set role for all except backbone which had been set
                     setattr(cc, 'role', FigureRoleEnum.STRUCTUREAUXILIARY)
-                    parent_panel = [parent for parent, dilated in parent_panel_pairs if dilated == structure][0]
-                    setattr(cc, 'parent_panel', parent_panel)
+
+    for cc in other_ccs:
+        # ``other_ccs`` are dilated - find raw ccs in ``fig``
+        fig_ccs = [fig_cc for fig_cc in fig.connected_components if  cc.contains(fig_cc)]
+        # Reset roles for these - overlap with dilated structure panels, but they don't merge on dilation
+        [setattr(fig_cc, 'role', None) for fig_cc in fig_ccs]
+
+
+    # for structure in resolved:
+    #     for cc in fig.connected_components:
+    #         if cc.role != FigureRoleEnum.STRUCTUREBACKBONE and structure.contains(cc):
+    #             setattr(cc, 'role', FigureRoleEnum.STRUCTUREAUXILIARY)
+    #             parent_panel = [parent for parent, dilated in parent_panel_pairs if dilated == structure][0]
+    #             setattr(cc, 'parent_panel', parent_panel)
+    #
+    # for structure, disconnected_overlapping_ccs in ambiguous:
+    #     for cc in fig.connected_components:
+    #         if cc.role != FigureRoleEnum.STRUCTUREBACKBONE:
+    #             condition_1 = structure.contains(cc)
+    #             condition_2 = lambda overlapping_cc: overlapping_cc.contains(cc)
+    #
+    #             if condition_1 and not (
+    #             any(condition_2(overlapping_cc) for overlapping_cc in disconnected_overlapping_ccs)):
+    #                 # include cc that are contained within structure and are either very small (parts of hashed bonds)
+    #                 # or are glued to the structure in the dilated image
+    #                 setattr(cc, 'role', FigureRoleEnum.STRUCTUREAUXILIARY)
+    #                 parent_panel = [parent for parent, dilated in parent_panel_pairs if dilated == structure][0]
+    #                 setattr(cc, 'parent_panel', parent_panel)
 
     log.info('Roles of structure auxiliaries have been assigned.')
 # def find_step_reactants_and_products(fig, step_arrow, all_arrows, structures):
@@ -646,7 +743,7 @@ def detect_structures(fig ):
 
     ## TODO:  Currently it also detects arrows - filter the out (using a compound model - KMeans, another DBSCAN?)
     # ## Now exclude the aspect ratio to remove arrows
-    # filtered = [panel for panel, label if labe == -1]
+    # filtered = [_panel for _panel, label if labe == -1]
     # area = [cc.area for cc in filtered]
     # num_lines = []
     # data = data[:,:2]
@@ -659,12 +756,13 @@ def detect_structures(fig ):
     #     ax.imshow(fig.img, cmap=plt.cm.binary)
     #     ax.set_title('filtered')
     #     # ax.set_title('structure identification')
-    #     for panel, label in paired:
-    #         rect_bbox = Rectangle((panel.left, panel.top), panel.right-panel.left, panel.bottom-panel.top, facecolor='none',edgecolor=colors[label])
+    #     for _panel, label in paired:
+    #         rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left, _panel.bottom-_panel.top, facecolor='none',edgecolor=colors[label])
     #         ax.add_patch(rect_bbox)
     #     #plt.savefig('backbones.tif')
     #     plt.show()
     structures = [panel for panel, label in paired if label == -1]
+    structures = [panel for panel in structures if panel.aspect_ratio + 1/panel.aspect_ratio < 5]  # Remove long lines
     [setattr(structure, 'role', FigureRoleEnum.STRUCTUREBACKBONE) for structure in structures]
 
     return structures
@@ -732,10 +830,8 @@ def extend_line(line, extension=None):
     :return: two endpoints of a new line
     """
 
-    if line.slope is np.inf:  # vertical line
+    if line.is_vertical:  # vertical line
         line.pixels.sort(key=lambda point: point.row)
-
-
         first_line_pixel = line.pixels[0]
         last_line_pixel = line.pixels[-1]
         if extension is None:
@@ -743,6 +839,8 @@ def extend_line(line, extension=None):
 
         left_extended_point = Point(row=first_line_pixel.row - extension, col=first_line_pixel.col)
         right_extended_point = Point(row=last_line_pixel.row + extension, col=last_line_pixel.col)
+
+
 
     else:
         line.pixels.sort(key=lambda point: point.col)
@@ -752,8 +850,13 @@ def extend_line(line, extension=None):
         if extension is None:
             extension = int((last_line_pixel.separation(first_line_pixel)) * 0.4)
 
-        left_extended_last_y = line.slope*(first_line_pixel.col-extension) + line.intercept
-        right_extended_last_y = line.slope*(last_line_pixel.col+extension) + line.intercept
+        if line.slope == 0:
+            left_extended_last_y = line.slope * (first_line_pixel.col - extension) + first_line_pixel.row
+            right_extended_last_y = line.slope * (last_line_pixel.col + extension) + first_line_pixel.row
+
+        else:
+            left_extended_last_y = line.slope*(first_line_pixel.col-extension) + line.intercept
+            right_extended_last_y = line.slope*(last_line_pixel.col+extension) + line.intercept
 
         left_extended_point = Point(row=left_extended_last_y, col=first_line_pixel.col-extension)
         right_extended_point = Point(row=right_extended_last_y, col=last_line_pixel.col+extension)
@@ -773,7 +876,7 @@ def find_nearby_ccs(start, all_relevant_ccs, distances, role=None, condition=(la
     checked again to form a cluster of nearby structures.
     :param Point or (x,y) start: point where the search starts
     :param [Panel,...] all_relevant_ccs: list of all found structures
-    :param type role: class specifying role of the ccs in the scheme (e.g. ChemicalStructure, Conditions)
+    :param type role: class specifying role of the ccs in the scheme (e.g. Diagram, Conditions)
     :param (float, lambda) distances: a tuple (maximum_initial_distance, distance_function) which specifies allowed
     distance from the starting point and a function defining cut-off distance for subsequent reference ccs
     :param lambda condition: optional condition to decide whether a connected component should be added to the frontier

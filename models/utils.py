@@ -52,6 +52,7 @@ class Line:
 
     def __init__(self,pixels):
         self.pixels = pixels
+        self.is_vertical = None
         self.slope, self.intercept = self.get_line_parameters()
 
     def __iter__(self):
@@ -63,17 +64,26 @@ class Line:
     def __repr__(self):
         return f'{self.__class__.__name__}({self.pixels})'
 
-    def get_line_parameters(line):
+    @property
+    def slope(self):
+        return self._slope
+
+    @slope.setter
+    def slope(self, value):
+        self._slope = value
+        self.is_vertical = True if self.slope == inf or abs(self.slope) > 10 else False
+
+    def get_line_parameters(self):
         """
         Calculates slope and intercept of ``line``
         :param Line or ((x1,y1), (x2,y2)) : one of the two representations of a straight line
         :return: (slope, intercept)
         """
-        if isinstance(line, Line):
-            point_1 = line.pixels[0]
+        if isinstance(self, Line):
+            point_1 = self.pixels[0]
             x1, y1 = point_1.col, point_1.row
 
-            point_2 = line.pixels[
+            point_2 = self.pixels[
                 -1]  # Can be any two points, but non-neighbouring points increase accuracy of calculation
             x2, y2 = point_2.col, point_2.row
 
@@ -126,3 +136,22 @@ class Line:
         #print('result:')
         #print(top/bottom)
         return top/bottom
+
+
+class DisabledNegativeIndices:
+    """If a negative index is passed to an underlying sequence, then an empty element of appropriate type is returned"""
+    def __init__(self, sequence):
+        self._sequence = sequence
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            if idx.start < 0:
+                idx = slice(0, idx.stop, idx.step)
+
+        elif isinstance(idx, int):
+            if self._sequence:
+                type_ = type(self._sequence[0])
+                if idx < 0:
+                    return type_()
+
+        return self._sequence[idx]
