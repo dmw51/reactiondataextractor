@@ -35,6 +35,7 @@ from matplotlib.patches import Rectangle
 #Remove Python2 compatibility?
 #from . import decorators
 from itertools import product
+from utils.rectangles import create_megabox
 import numpy as np
 import scipy.ndimage as ndi
 from skimage.measure import regionprops
@@ -351,6 +352,12 @@ class Rect(object):
         dummy_fig = Figure(img, img)
         return Crop(dummy_fig, Rect(0, dummy_fig.width, 0, dummy_fig.height))
 
+    def create_extended_crop(self, figure, extension):
+        left, right, top, bottom = self.__call__()
+        left, right = left - extension, right + extension
+        top, bottom = top - extension, bottom + extension
+        return Panel(left, right, top, bottom).create_crop(figure)
+
 class Panel(Rect):
     """ Tagged section inside Figure"""
 
@@ -401,7 +408,19 @@ class Panel(Rect):
             self._crop = Crop(self.fig, [self.left, self.right, self.top, self.bottom])
         return self._crop
 
+    def merge_underlying_panels(self, fig):
+        """
+        Merges all underlying connected components of the panel (made up of multiple dilated,
+        merged connected components) to create a single, large panel.
 
+        All connected components in ``fig`` that are entirely within the panel are merged to create an undilated
+        superpanel (important for standardisation)
+        :param Figure fig: Analysed figure
+        :param Panel dilated_panel: dilated superpanel
+        :return: Panel; undilated superpanel
+        """
+        ccs_to_merge = [cc for cc in fig.connected_components if self.contains(cc)]
+        return create_megabox(ccs_to_merge)
 
 class Figure(object):
     """A figure image."""

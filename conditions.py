@@ -13,6 +13,7 @@ from itertools import chain
 import logging
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 import re
 
 from scipy.signal import find_peaks, argrelmin
@@ -27,7 +28,8 @@ from models.reaction import Conditions
 from models.arrows import SolidArrow
 from models.segments import Rect, Figure, TextLine, Crop, FigureRoleEnum, ReactionRoleEnum
 from models.utils import Point, Line, DisabledNegativeIndices
-from utils.processing import approximate_line, create_megabox, find_minima_between_peaks
+from utils.processing import approximate_line, find_minima_between_peaks
+from utils.rectangles import create_megabox
 from utils.processing import (binary_tag, get_bounding_box, erase_elements, is_boundary_cc,
                               isolate_patches, crop_rect, transform_panel_coordinates_to_expanded_rect, transform_panel_coordinates_to_shrunken_region,
                               label_and_get_ccs)
@@ -38,12 +40,13 @@ from chemschematicresolver.actions import read_diagram_pyosra
 
 from ocr import read_conditions, read_isolated_conditions
 from chemdataextractor.doc import Paragraph, Span, Sentence
+from chemdataextractor.nlp.tokenize import ChemWordTokenizer
 from chemschematicresolver.parse import ChemSchematicResolverTokeniser
 from matplotlib.patches import Rectangle
 
 log = logging.getLogger('extract.conditions')
 
-
+SPECIES_FILE = os.path.join(os.getcwd(),'dict', 'species.txt')
 
 class ConditionParser:
     """
@@ -58,7 +61,7 @@ class ConditionParser:
     """
     default_values = r'((?:\d\.)?\d{1,3})'
     cat_units = r'(mol\s?%|M|wt\s?%)'
-    co_units = r'(equiv(?:alents?)?\.?|m?L)'
+    co_units = r'(eq\.?(?:uiv(?:alents?)?\.?)?|m?L)'
 
     def __init__(self, sentences, ):
 
@@ -90,6 +93,9 @@ class ConditionParser:
     @staticmethod
     def _identify_species(sentence):
 
+        with open(SPECIES_FILE, 'r') as file:
+            species_list = file.read().split('\n')
+
         #formulae_identifiers = r'(\(?\b(?:[A-Z]+[a-z]{0,1}[0-9]{0,2}\)?\d?)+\b\)?\d?)'  # A sequence of capital
         # letters between which some lowercase letters and digits are allowed, optional brackets
         # cems = [cem.text for cem in cems]
@@ -114,7 +120,11 @@ class ConditionParser:
                                       entity_mentions_numbers, entity_mentions_letters) if e.group(1)]
 
         all_mentions = [mention for mention in spans]
-        all_mentions = [mention for mention in all_mentions if mention != 'M']  # Special case, denotes concentration
+        # Add species from the list, treat them as seeds - allow more complex names
+        # eg. based on 'pentanol' on the list, allow '1-pentanol'
+        species_from_list = [token for token in sentence.tokens if any(species in token.text for species in species_list
+                                                                       if species)]  # except ''
+        all_mentions += species_from_list
         return list(set(all_mentions))
 
     @staticmethod
@@ -135,15 +145,16 @@ class ConditionParser:
     @staticmethod
     def _parse_other_species(sentence):
         cems = ConditionParser._identify_species(sentence)
-        other_species_if_end = r'(?:,|\.|$|\s)\s?(?!\d)'
-
-        other_species = []
-        for cem in cems:
-            cem = cem.text
-            species_str = re.compile('(' + re.escape(cem) + ')' + other_species_if_end)
-            species = re.search(species_str, sentence.text)
-            if species and species.group(1) == cem:
-                other_species.append(cem)
+        return [cem.text for cem in cems]
+        # other_species_if_end = r'(?:,|\.|$|\s)\s?(?!\d)'
+        #
+        # other_species = []
+        # for cem in cems:
+        #     cem = cem.text
+        #     species_str = re.compile('(' + re.escape(cem) + ')' + other_species_if_end)
+        #     species = re.search(species_str, sentence.text)
+        #     if species and species.group(1) == cem:
+        #         other_species.append(cem)
 
         return other_species
 
@@ -168,25 +179,31 @@ class ConditionParser:
 
     @staticmethod
     def _find_closest_cem(sentence, parse_str):
+        phrase = sentence.text
         matches = []
+        cwt = ChemWordTokenizer()
         bracketed_units_pat = re.compile(r'\(\s*'+parse_str+r'\s*\)')
         bracketed_units = re.findall(bracketed_units_pat, sentence.text)
-        if bracketed_units:
-            sentence = Sentence(re.sub(bracketed_units_pat, ' '.join(bracketed_units[0]), sentence.text))
-        else:
-            parse_str = re.compile(parse_str)
-        for match in re.finditer(parse_str, sentence.text):
-            #TODO: match_sent should be a sequence of tokens. Look up tokenisers in CDE
-            match_sent = Sentence(match.group(0), word_tokenizer=ChemSchematicResolverTokeniser())
-            match_start_idx = [idx for idx, token in enumerate(sentence.raw_tokens) if token == match_sent.raw_tokens[0]][0]
-            match_end_idx = [idx for idx, token in enumerate(sentence.raw_tokens) if token == match_sent.raw_tokens[-1]][0]
+        if bracketed_units:   #  remove brackets
+            phrase = re.sub(bracketed_units_pat, ' '.join(bracketed_units[0]), phrase)
+        # else:
+        #     parse_str = re.compile(parse_str)
+        for match in re.finditer(parse_str, phrase):
+            match_tokens = cwt.tokenize(match.group(0))
+            phrase_tokens = cwt.tokenize(phrase)
+            match_start_idx = [idx for idx, token in enumerate(phrase_tokens) if match_tokens[0] in token][0]
+            match_end_idx = [idx for idx, token in enumerate(phrase_tokens) if match_tokens[-1] in token][0]
+            # To simplify syntax above, introduce a new tokeniser that splits full stops more consistently
             #Accept two tokens, strip commas and full stops, especially if one of the tokens
-            species = DisabledNegativeIndices(sentence.tokens)[match_start_idx-2:match_start_idx]
-            species = ' '.join(token.text for token in species).strip('., ')
+            species = DisabledNegativeIndices(phrase_tokens)[match_start_idx-2:match_start_idx]
+            species = ' '.join(token for token in species).strip('()., ')
             if not species:
                 try:
-                    species = DisabledNegativeIndices(sentence.tokens)[match_end_idx+1:match_start_idx+4]
-                    species = ' '.join(token.text for token in species).strip('., ')
+                    species = DisabledNegativeIndices(phrase_tokens)[match_end_idx+1:match_start_idx+4]
+                    # filter special signs and digits
+                    species = map(lambda s: s.strip('., '), species)
+                    species = filter(lambda token: token.isalpha(), species)
+                    species = ' '.join(token for token in species)
                 except IndexError:
                     log.debug('Closest CEM not found for a catalyst/coreactant key phrase')
                     species = ''
@@ -208,14 +225,22 @@ class ConditionParser:
     @staticmethod
     def _filter_species(parsed):
         """ If a chemical species has been assigned as both catalyst or coreactant, and `other species`, remove if from
-        the latter"""
+        the latter. Also remove special cases"""
         coreactants, catalysts, other_species, _ = parsed
         combined = [d['Species'] for d in coreactants] + [d['Species'] for d in catalysts]
-        if combined:
-            combined.extend(*[species.split(' ') for species in combined])  # include individual tokens for multi-token names
-        other_species = [species for species in other_species if species not in combined]
+        # if not coreactants or catalysts found, return unchanged
+        if not combined:
+            return other_species
 
-        return list(set(other_species))
+        else:
+            unaccounted = []
+            combined = ' '.join(combined)
+            for species in other_species:
+                found = re.search(re.escape(species), combined)  # include individual tokens for multi-token names
+                if not found and species != 'M':
+                    unaccounted.append(species)
+            return list(set(unaccounted))
+
 
 
     @staticmethod
@@ -298,7 +323,7 @@ def get_conditions(fig, arrow):
     [setattr(panel, 'role', ReactionRoleEnum.CONDITIONS) for panel in condition_structures]
 
     if textlines:
-        recognised = [read_conditions(fig, line, conf_threshold=0.4) for line in textlines]
+        recognised = [read_conditions(fig, line, conf_threshold=40) for line in textlines]
         print(recognised)
         # print(f'recognised text: {recognised}')
         # spell_checked = [Correct(line).correct_text() for line in recognised if line]
@@ -425,7 +450,7 @@ def mark_text_lines(fig, arrow, conditions_panels):
 
     condition = condition1 and condition2
     middle_pixel = arrow.center_px
-    distance_fn = lambda cc: 2.5 * cc.height
+    distance_fn = lambda cc: 2.2 * cc.height
     core_ccs = find_nearby_ccs(middle_pixel, fig.connected_components, (3*average_height, distance_fn),
                                condition=condition)
     if not core_ccs:

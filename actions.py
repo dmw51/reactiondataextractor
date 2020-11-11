@@ -22,8 +22,9 @@ from models.segments import Rect, Panel, Figure, FigureRoleEnum, ReactionRoleEnu
 from models.utils import Point, Line
 from utils.processing import approximate_line, pixel_ratio, binary_close, binary_floodfill, dilate_fragments
 from utils.processing import (binary_tag, get_bounding_box, erase_elements,
-                              isolate_patches, is_a_single_line, create_megabox)
-from ocr import read_character
+                              isolate_patches, is_a_single_line)
+from utils.rectangles import create_megabox
+# from ocr import read_character
 import settings
 
 log = logging.getLogger('extract.actions')
@@ -117,18 +118,22 @@ def find_optimal_dilation_ksize(fig=None):
     kernel_sizes = {}
     for backbone in backbones:
         left, right, top, bottom = backbone
-        crop_rect = Rect(left-50, right+50, top-50, bottom+50)
+        horz_ext, vert_ext = backbone.width//2, backbone.height//2
+        crop_rect = Rect(left-horz_ext, right+horz_ext, top-vert_ext, bottom+vert_ext)
         p_ratio = skeletonize_area_ratio(fig, crop_rect)
         log.debug(f'found in-crop skel_pixel ratio: {p_ratio}')
 
         kernel_size = 4
         # mean_p_ratio = np.mean(p_ratios)
-        if 0.016 < p_ratio < 0.02:
-            kernel_size += 4
-        elif 0.01 < p_ratio < 0.016:
-            kernel_size += 8
+        if 0.01 < p_ratio < 0.02:
+            size_increase = int((0.02-p_ratio)/0.002)+1
+            kernel_size += size_increase
+        # if 0.015 <= p_ratio < 0.02:
+        #     kernel_size += 2
+        # if 0.01 <= p_ratio < 0.015:
+        #     kernel_size += 4
         elif p_ratio < 0.01:
-            kernel_size += 12
+            kernel_size = 12
 
         kernel_sizes[backbone] = kernel_size
         log.info(f'Structure segmentation kernels:{kernel_sizes.values()}')
@@ -220,8 +225,9 @@ def find_solid_arrows(fig, threshold, min_arrow_length):
             continue
         else:
             parent_label = labelled_img[p1.row, p1.col]
-            parent_panel = [cc for cc in fig.connected_components if p1.row in range(cc.top, cc.bottom+1) and
-                                                                    p1.col in range(cc.left, cc.right+1)][0]
+            inrange = lambda cc, point: point.row in range(cc.top, cc.bottom+1) and\
+                                        point.col in range(cc.left, cc.right+1)
+            parent_panel = [cc for cc in fig.connected_components if inrange(cc, p1) and inrange(cc, p2)][0]
         if not is_a_single_line(skeletonized, parent_panel, min_arrow_length//2):
             continue
         # print('checking p1:...')
@@ -304,8 +310,16 @@ def complete_structures(fig: Figure):
     _assign_backbone_auxiliaries(fig, (dilated_structure_panels, other_ccs), structure_panels)  # Assigns cc roles
     # settings.main_figure[0] = fig   # This is an awful way to do it, losing conditions info (look at input fig)
     # # Need to somehow disentangle the different versions of ``fig`` - roles needed for later
-
-    return structure_panels
+    temp = copy.deepcopy(structure_panels)
+    # simple filtering to account for multiple backbones
+    for panel1 in temp:
+        for panel2 in temp:
+            if panel2.contains(panel1) and panel2 != panel1:
+                try:
+                    structure_panels.remove(panel1)
+                except ValueError:
+                    pass
+    return list(set(structure_panels))
 
 
 
@@ -334,8 +348,9 @@ def find_dilated_structures(fig, backbones):
             dilated_temp = dilate_fragments(fig, ksize)
             dilated_imgs[ksize] = dilated_temp
         dilated_structure_panel = [cc for cc in dilated_temp.connected_components if cc.contains(backbone)][0]
-
-        structure_crop = Crop(dilated_temp, dilated_structure_panel())
+        # Crop around with a small extension to get the connected component correctly
+        structure_crop = dilated_structure_panel.create_extended_crop(dilated_temp, extension=5)
+            # Crop(dilated_temp, dilated_structure_panel())
         other = [structure_crop.in_main_fig(c) for c in structure_crop.connected_components if structure_crop.in_main_fig(c) != dilated_structure_panel]
         other_ccs.extend(other)
         dilated_structure_panels.append(dilated_structure_panel)
@@ -362,7 +377,7 @@ def scan_form_reaction_step(conditions, diags):
     :return: a ReactionStep object
     """
     arrow = conditions.arrow
-    endpoint1, endpoint2 = extend_line(conditions.arrow.line, extension=arrow.pixels[0].separation(arrow.pixels[-1]))
+    endpoint1, endpoint2 = extend_line(conditions.arrow.line, extension=arrow.pixels[0].separation(arrow.pixels[-1])*0.75)
     react_side_point = conditions.arrow.react_side[0]
     endpoint1_close_to_react_side = endpoint1.separation(react_side_point) < endpoint2.separation(react_side_point)
     if endpoint1_close_to_react_side:
@@ -370,17 +385,27 @@ def scan_form_reaction_step(conditions, diags):
     else:
         react_endpoint, prod_endpoint = endpoint2, endpoint1
 
-    initial_distance = 1.25 * np.sqrt(np.mean([diag.panel.area for diag in diags]))
+    initial_distance = 1.5 * np.sqrt(np.mean([diag.panel.area for diag in diags]))
+    extended_distance = 4 * np.sqrt(np.mean([diag.panel.area for diag in diags]))
     distance_fn = lambda diag: 1.5*np.sqrt(diag.panel.area)
+
     distances = initial_distance, distance_fn
+    extended_distances = extended_distance, distance_fn
     reactants = find_nearby_ccs(react_endpoint, diags, distances,
                                 condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
     if not reactants:
+        reactants = find_nearby_ccs(react_endpoint, diags, extended_distances,
+                        condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
+    if not reactants:
         reactants = search_elsewhere('up-right', diags, conditions.arrow,  distances)
-
 
     products = find_nearby_ccs(prod_endpoint, diags, distances,
                                condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
+
+    if not products:
+        products = find_nearby_ccs(prod_endpoint, diags, extended_distances,
+                        condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
+
     if not products:
         products = search_elsewhere('down-left', diags, conditions.arrow, distances)
     return ReactionStep(reactants, products, conditions=conditions)
@@ -461,7 +486,7 @@ def _complete_structures(fig, dilated_structure_panels):
     # f = plt.figure()
     # ax = f.add_axes([0,0,1,1])
     # ax.imshow(fig.img)
-    # for _panel in structure_panels:
+    # for _panel in _structure_panels:
     #     rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left, _panel.bottom-_panel.top, facecolor='none',edgecolor='r')
     #     ax.add_patch(rect_bbox)
     # plt.show()
@@ -469,7 +494,7 @@ def _complete_structures(fig, dilated_structure_panels):
     # f = plt.figure()
     # ax = f.add_axes([0,0,1,1])
     # ax.imshow(dilated.img)
-    # for _panel in structure_panels:
+    # for _panel in _structure_panels:
     #     rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right-_panel.left, _panel.bottom-_panel.top, facecolor='none',edgecolor='r')
     #     ax.add_patch(rect_bbox)
     # plt.show()
@@ -478,7 +503,7 @@ def _complete_structures(fig, dilated_structure_panels):
 
 def _assign_backbone_auxiliaries(fig, dilated_panels, structure_panels):
     """
-    Takes in the ``structure_panels`` to assign roles to structural auxiliaries (solitary
+    Takes in the ``_structure_panels`` to assign roles to structural auxiliaries (solitary
     bondlines, superatom labels) found in ``figure`` based on comparison between each structure _panel and its
     corresponding backbone in ``figure``.
     :param Figure fig: analysed figure
@@ -590,80 +615,89 @@ def _assign_backbone_auxiliaries(fig, dilated_panels, structure_panels):
 #     return {'reactants':reactants, 'products':products}
 
 
-def remove_redundant_characters(fig, ccs, chars_to_remove=None):
-    """
-    Removes reduntant characters such as '+' and '[', ']' from an image to facilitate resolution of diagrams and labels.
-    This function takes in `ccs` which are ccs to be considered. It then closes all connected components in `fig.img1
-    and compares connected components in `ccs` and closed image. This way, text characters belonging to structures are
-    not considered.
-    :param iterable ccs: iterable of Panels containing species to check
-    :param chars_to_remove: characters to be removed
-    :return: list connected components containing redundant characters
-    """
-    # TODO: Store closed image globally and use when needed?
-    if chars_to_remove is None:
-        chars_to_remove = '+[]'
+# def remove_redundant_characters(fig, ccs, chars_to_remove=None):
+#     """
+#     Removes reduntant characters such as '+' and '[', ']' from an image to facilitate resolution of diagrams and labels.
+#     This function takes in `ccs` which are ccs to be considered. It then closes all connected components in `fig.img1
+#     and compares connected components in `ccs` and closed image. This way, text characters belonging to structures are
+#     not considered.
+#     :param iterable ccs: iterable of Panels containing species to check
+#     :param chars_to_remove: characters to be removed
+#     :return: list connected components containing redundant characters
+#     """
+#     # TODO: Store closed image globally and use when needed?
+#     if chars_to_remove is None:
+#         chars_to_remove = '+[]'
+#
+#     ccs_to_consider = [cc for cc in fig.connected_components if not cc.role]
+#
+#     diags_to_erase = []
+#     for cc in ccs_to_consider:
+#         text_word = read_character(fig, cc)
+#
+#         if text_word:
+#             text = text_word.text
+#             # print(f'recognised char: {text}')
+#
+#             if any(redundant_char is text for redundant_char in chars_to_remove):
+#                 diags_to_erase.append(cc)
+#
+#     return erase_elements(fig, diags_to_erase)
 
-    ccs_to_consider = [cc for cc in fig.connected_components if not cc.role]
 
-    diags_to_erase = []
-    for cc in ccs_to_consider:
-        text_word = read_character(fig, cc)
-
-        if text_word:
-            text = text_word.text
-            # print(f'recognised char: {text}')
-
-            if any(redundant_char is text for redundant_char in chars_to_remove):
-                diags_to_erase.append(cc)
-
-    return erase_elements(fig, diags_to_erase)
-
-
-def remove_redundant_square_brackets(fig, ccs):
-    """
-    Remove large, redundant square brackets, containing e.g. reaction conditions. These are not captured when parsing
-    conditions' text (taller than a text line).
-    :param Figure fig: Analysed figure
-    :param [Panels] ccs: Iterable of Panels to consider for removal
-    :return: Figure with square brackets removed
-    """
-    candidate_ccs = filter(lambda cc: cc.aspect_ratio > 5 or cc.aspect_ratio < 1 / 5, ccs)
-
-    detected_lines = 0
-    bracket_ccs = []
-
-    # transform
-    for cc in candidate_ccs:
-        cc_fig = isolate_patches(fig,
-                                 [cc])  # Isolate appropriate connected components in preparation for Hough
-        # plt.imshow(cc_fig.img)
-        # plt.show()
-        line_length = (cc.width + cc.height) * 0.5  # since length >> width or vice versa, this is equal to ~0.8*length
-        line = probabilistic_hough_line(cc_fig.img, line_length=int(line_length))
-        if line:
-            detected_lines += 1
-            bracket_ccs.append(cc)
-
-    print(bracket_ccs)
-    if len(bracket_ccs) % 2 == 0:
-        fig = erase_elements(fig, bracket_ccs)
-
-    return fig
+# def remove_redundant_square_brackets(fig, ccs):
+#     """
+#     Remove large, redundant square brackets, containing e.g. reaction conditions. These are not captured when parsing
+#     conditions' text (taller than a text line).
+#     :param Figure fig: Analysed figure
+#     :param [Panels] ccs: Iterable of Panels to consider for removal
+#     :return: Figure with square brackets removed
+#     """
+#     candidate_ccs = filter(lambda cc: cc.aspect_ratio > 5 or cc.aspect_ratio < 1 / 5, ccs)
+#
+#     detected_lines = 0
+#     bracket_ccs = []
+#
+#     # transform
+#     for cc in candidate_ccs:
+#         cc_fig = isolate_patches(fig,
+#                                  [cc])  # Isolate appropriate connected components in preparation for Hough
+#         # plt.imshow(cc_fig.img)
+#         # plt.show()
+#         line_length = (cc.width + cc.height) * 0.5  # since length >> width or vice versa, this is equal to ~0.8*length
+#         line = probabilistic_hough_line(cc_fig.img, line_length=int(line_length))
+#         if line:
+#             detected_lines += 1
+#             bracket_ccs.append(cc)
+#
+#     print(bracket_ccs)
+#     if len(bracket_ccs) % 2 == 0:
+#         fig = erase_elements(fig, bracket_ccs)
+#
+#     return fig
 
 
 def detect_structures(fig ):
     """
     Detects structures based on parameters such as size, aspect ratio and number of detected lines
 
+
+    First, the figure is dilated slightly to merge disconnected (by heteroatoms) structure fragments. The resulting
+    connected components' panels are then used to create relevant features. A boundary line length (approximation of a
+    single bond length) is derived and number of straight lines in each of the panels is found. Area and aspect ratio are
+    also used in feature creation. Finally, a DBSCAN is performed on the formed dataset.
     :param Figure fig: analysed figure
     :return [Panels]: list of connected components classified as structures
     """
+    # TODO: Complete the new algorithm
+    # dilation_kernel = min(list(fig.kernel_sizes.values()))
+    # dilated_fig = dilate_fragments(f)
     ccs = fig.connected_components
     # Get a rough bond length (line length) value from the two largest structures
     ccs = sorted(ccs, key=lambda cc: cc.area, reverse=True)
     estimation_fig = skeletonize(isolate_patches(fig, ccs[:2]))
-    length_scan_param = 0.02 * max(fig.width, fig.height)
+    length_scan_param = 0.025 * max(fig.width, fig.height)
+    # length_scan_param = np.percentile([cc.height for cc in fig.connected_components], 50)   # exclude common characters
     length_scan_start = length_scan_param if length_scan_param > 20 else 20
     min_line_lengths = np.linspace(length_scan_start, 3*length_scan_start, 20)
     # print(min_line_lengths)
@@ -762,7 +796,7 @@ def detect_structures(fig ):
     #     #plt.savefig('backbones.tif')
     #     plt.show()
     structures = [panel for panel, label in paired if label == -1]
-    structures = [panel for panel in structures if panel.aspect_ratio + 1/panel.aspect_ratio < 5]  # Remove long lines
+    structures = [panel for panel in structures if panel.aspect_ratio + 1/panel.aspect_ratio < 10]  # Remove long lines
     [setattr(structure, 'role', FigureRoleEnum.STRUCTUREBACKBONE) for structure in structures]
 
     return structures

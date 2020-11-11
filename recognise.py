@@ -47,7 +47,12 @@ class DiagramRecogniser:
         """
 
         # Add some padding to image to help resolve characters on the edge
-        padded_img = pad(diag.crop.raw_img, ((5, 5), (5, 5), (0, 0)), mode='constant', constant_values=1)
+        img = diag.crop.raw_img
+        if len(img.shape) == 3:
+            padded_img = pad(img, ((5, 5), (5, 5), (0, 0)), mode='constant', constant_values=1)
+        elif len(img.shape) == 2:
+            padded_img = pad(img, ((5, 5), (5, 5)), mode='constant', constant_values=1)
+
 
         # Save a temp image
         img_name = 'r_group_temp.' + extension

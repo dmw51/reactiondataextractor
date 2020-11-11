@@ -8,7 +8,7 @@ import settings
 from actions import find_nearby_ccs, dilate_fragments
 from models.segments import ReactionRoleEnum, FigureRoleEnum, Panel, Rect, coords_deco, Crop
 from models.reaction import Diagram, Label
-from utils.processing import merge_underlying_panels
+
 
 import csv
 import cirpy
@@ -60,49 +60,73 @@ class LabelAssigner:
                     for structure in self.react_prods_structures]
         diagrams_conditions = [Diagram(panel=structure, label=None, crop=Crop(self.fig, structure))
                                for structure in self.conditions_structures]
-        return diagrams+diagrams_conditions
+        all_diagrams = diagrams + diagrams_conditions
+        all_diagrams = self.resolve_labels(all_diagrams)
+        return all_diagrams
 
     def find_label(self, structure):
         """Finds a label for each structure. if multiple distinct potential label regions are found, resolves them
         by first merging adjacent chracters and then looking for the closest merged label"""
         seeds = self._find_seed_ccs(structure)
-        label_clusters = []
+        clusters_ccs = []
         if seeds:
             for seed in seeds:
-                label_clusters += self._expand_seed(seed)
+                clusters_ccs += self._expand_seed(seed)
 
-            label_clusters = list(set(label_clusters))
-            label = self._choose_label_cluster(label_clusters, structure)
-            recognised = self.check_label_validity(label)
-            if not recognised:
-                # Try a different cluster, if any
-                label_clusters = [cluster for cluster in label_clusters if not label.panel.contains(cluster)]
-                label = self._choose_label_cluster(label_clusters, structure)
-                recognised = self.check_label_validity(label)
-                if not recognised:
-                    return None
-                return recognised
+            label_clusters = self._merge_into_cluters(clusters_ccs)
+            label = self._assess_potential_labels(label_clusters, structure)
+            if label:
+                label.panel = label.merge_underlying_panels(self.fig)
+                return label
+            # while label_clusters:  # Try all clusters, starting from the closest one
+            #     # TODO: merging should occur just once, before this loop
+            #     label_cluster = min(label_clusters, key=lambda sd: sd.separation(structure))
+            #     label_clusters = [cluster for cluster in label_clusters if not label_cluster == cluster]
+            #     label = Label(label_cluster)
+            #     recognised = self.check_label_validity(label)
+            #     if recognised:
+            #         break
+            # if not recognised:
+            #     return None
+            # else:
+            #     label.panel = label.merge_underlying_panels(self.fig)
+            #     return label
 
-            else:
-                return recognised
 
-        else:
-            label = None
-
-        return Label(label) if label else None
 
     def check_label_validity(self, label):
+        label = Label(label)
         text, conf = read_label(settings.main_figure[0], label)
-        if conf < self.confidence_threshold:
+
+        if not text and conf == 0:
+            log.debug('Wrong label assigned - looking for a different panel')
+            return None
+
+        elif conf < self.confidence_threshold:
             log.info('label recognition failed - recognition confidence below threshold')
             label.text = []
             return label
-        elif text in ['', '+', ',', '.']:
-            log.debug('Wrong label assigned - looking for a different panel')
-            return None
+
         else:
             label.text = text
             return label
+
+    def resolve_labels(self, diags):
+        """Used for resolving labels that have been assigned to multiple diagrams
+        :param [Diagram,...] diags: iterable of chemical Diagrams
+        :return [Diagram,...]: iterable of mutated diagrams - with appropriate ``label``s set to None
+
+
+        Pools all labels, then checks them one by one. If any label is assigned to multiple diagrams, reassigns it
+        to the closest diagram, clears labels from the other diagrams."""
+        all_labels = set([diag.label for diag in diags if diag.label])
+        for label in all_labels:
+            parent_diags = [diag for diag in diags if diag.label == label]
+            if len(parent_diags) > 1:
+                closest = min(parent_diags, key=lambda diag: diag.separation(label.panel))
+                [setattr(diag, 'label', None) for diag in parent_diags if diag != closest]
+
+        return diags
 
     def merge_label_horizontally(self, merge_candidates):
         """ Iteratively attempt to merge horizontally
@@ -152,21 +176,31 @@ class LabelAssigner:
         output_panels = self._retag_panels(panels)
         return output_panels, all_merged
 
-    def _choose_label_cluster(self, clusters, structure):
-        """Chooses a label cluster for ``structure`` from provided ``clusters``"""
-
-        clusters_merged_horizontally = self.merge_label_horizontally(clusters)
+    def _merge_into_cluters(self, clusters_ccs):
+        label_ccs = list(set(clusters_ccs))
+        clusters_merged_horizontally = self.merge_label_horizontally(label_ccs)
         clusters_merged = self.merge_labels_vertically(clusters_merged_horizontally)
-        label = min(clusters_merged, key=lambda sd: sd.separation(structure))
-        label = Label(merge_underlying_panels(self.fig, label))
-        return label
+        return clusters_merged
+
+    def _assess_potential_labels(self, label_clusters, structure):
+        potential_labels = list(filter(lambda label: label is not None,
+                                       [self.check_label_validity(cluster) for cluster in label_clusters]))
+        clusters_underneath = [cluster for cluster in potential_labels
+                               if cluster.center[1] > structure.center[1]]
+        if clusters_underneath:
+            return min(clusters_underneath, key=lambda cc: cc.separation(structure))
+        elif potential_labels:
+            return min(potential_labels, key=lambda cc: cc.separation(structure))
+        else:
+            return None
 
     def _dilate_fig(self):
         """Dilates the processed figure to reduce running time for subsequent panel merges"""
-        ksize = int(np.mean(list(self.fig.kernel_sizes.values())))
+        ksize = min(list(self.fig.kernel_sizes.values()))
         dilated = dilate_fragments(self.fig, ksize)
+        structures = self.react_prods_structures + self.conditions_structures
         for cc in dilated.connected_components:
-            if cc in self.react_prods_structures or cc in self.conditions_structures:
+            if any(cc.contains(structure) for structure in structures):
                 cc.role = ReactionRoleEnum.GENERIC_STRUCTURE_DIAGRAM
 
         return dilated
@@ -176,7 +210,7 @@ class LabelAssigner:
         non_structures = [cc for cc in self.fig.connected_components
                           if cc.role != FigureRoleEnum.STRUCTUREAUXILIARY
                           and cc.role != FigureRoleEnum.STRUCTUREBACKBONE]
-        cutoff = max([structure.width, structure.height])
+        cutoff = max([structure.width, structure.height]) * 1.25
         close_ccs = sorted(non_structures, key=lambda cc: structure.separation(cc))
         close_ccs = [cc for cc in close_ccs if structure.separation(cc) < cutoff]
         return close_ccs
@@ -189,7 +223,8 @@ class LabelAssigner:
         #                                (initial_distance, settings.DISTANCE_FN_CHARS), condition=condition)
         #
         # char_cluster = nearby_chars + [seed]
-        char_cluster = [cc for cc in self._dilated_fig.connected_components if cc.contains(seed)]
+        char_cluster = [cc for cc in self._dilated_fig.connected_components
+                        if cc.contains(seed) if cc.role != ReactionRoleEnum.GENERIC_STRUCTURE_DIAGRAM]
         return char_cluster
 
     def _merge_loop_horizontal(self, panels,):
@@ -213,8 +248,8 @@ class LabelAssigner:
                     and abs(a.height - b.height) < min(a.height, b.height):
 
                 # Check that the distance between the edges of panels is not too large
-                if (0 <= a.left - b.right < (min(a.height, b.height) * 2)) or (
-                        0 <= (b.left - a.right) < (min(a.height, b.height) * 2)):
+                if (0 <= a.left - b.right < (min(a.height, b.height) * 1.5)) or (
+                        0 <= (b.left - a.right) < (min(a.height, b.height) * 1.5)):
                     merged_rect = self._merge_rect(a, b)
                     merged_panel = Panel(merged_rect.left, merged_rect.right, merged_rect.top, merged_rect.bottom, 0)
                     output_panels.append(merged_panel)

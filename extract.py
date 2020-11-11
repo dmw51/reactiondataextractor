@@ -12,8 +12,8 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from PIL import Image, ImageOps
 
-from actions import (detect_structures, find_arrows, get_conditions_smiles, complete_structures,
-                     remove_redundant_characters, find_optimal_dilation_ksize, scan_form_reaction_step)
+from actions import (detect_structures, find_arrows, complete_structures,
+                      find_optimal_dilation_ksize, scan_form_reaction_step)
 from conditions import get_conditions, clear_conditions_region
 from models.segments import FigureRoleEnum, ReactionRoleEnum
 from models.output import ReactionScheme
@@ -64,11 +64,14 @@ def extract_image(filename, debug=False):
     log.info('Detected %d arrows' % len(arrows))
 
     structure_panels = complete_structures(fig)
+
+    #### Hide the following inside a function
     conditions, conditions_structures = zip(*[get_conditions(fig, arrow) for arrow in arrows])
     conditions_structures = [panel for step_panels in conditions_structures for panel in step_panels]
     [setattr(structure, 'role', ReactionRoleEnum.CONDITIONS) for structure in structure_panels
      if structure in conditions_structures]
     react_prod_structures = [panel for panel in structure_panels if panel not in conditions_structures]
+    ####
     for step_conditions in conditions:
         log.info('Conditions dictionary found: %s' % step_conditions.conditions_dct)
 
@@ -79,8 +82,8 @@ def extract_image(filename, debug=False):
 
 
     # fig_clean = remove_redundant_characters(fig_no_cond, fig_no_cond.connected_components)
-    processed = Image.fromarray(fig_no_cond.img).convert('RGB')
-    processed = ImageOps.invert(processed)
+    # processed = Image.fromarray(fig_no_cond.img).convert('RGB')
+    # processed = ImageOps.invert(processed)
 
     # segmented_filepath = MAIN_DIR + '/processed' + '.tif'
     # processed.save(segmented_filepath)
@@ -92,12 +95,13 @@ def extract_image(filename, debug=False):
 
     recogniser = DiagramRecogniser(diags)
     recogniser.recognise_diagrams()
-    log.debug('Cleaned image sent to the structure-label resolution model')
-    # csr_out = csr.extract_image_rde(MAIN_DIR + '/processed.tif', kernel_sizes=fig.kernel_sizes, debug=True,
-    #                                 allow_wildcards=False)
-    # log.info('CSR found the following species: %s' % csr_out[0])
-    # conditions = get_conditions_smiles(csr_out, conditions)
-
+    ### Hide the following inside a function
+    for step_conditions in conditions:
+        if step_conditions._structure_panels:
+            cond_diags = [diag for diag in diags if diag.panel in step_conditions._structure_panels]
+            step_conditions.diags = cond_diags
+            step_conditions.conditions_dct['other species'].extend([diag.smiles for diag in cond_diags if diag.smiles])
+    ####
     steps = [scan_form_reaction_step(step_conditions, diags) for step_conditions in conditions]
     log.info('SMILES-structure matching complete.')
     if debug:

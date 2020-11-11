@@ -93,7 +93,10 @@ class SolidArrow(BaseArrow):
         super(SolidArrow, self).__init__(pixels, line, panel)
         self.react_side = None
         self.prod_side = None
-
+        a_ratio = self.panel.aspect_ratio
+        a_ratio = 1/a_ratio if a_ratio < 1 else a_ratio
+        if a_ratio < 3:
+            raise NotAnArrowException('aspect ratio is not within the accepted range')
 
         self.react_side, self.prod_side = self.get_direction()  # Assign self.react_side and self.prod_side
         pixel_majority = len(self.prod_side) - len(self.react_side)
@@ -105,8 +108,6 @@ class SolidArrow(BaseArrow):
         elif pixel_majority < 2 * min_pixels:
             log.warning('Difficulty detecting arrow sides - low pixel majority')
 
-        if self.line.slope == 0 and self.panel.aspect_ratio < 4:
-            raise NotAnArrowException('the aspect ratio is too low')
         log.info('Arrow accepted!')
 
     def __repr__(self):
@@ -131,18 +132,19 @@ class SolidArrow(BaseArrow):
         return self.prod_side[0] if prod_side_lhs else self.prod_side[-1]
 
     def get_direction(self):
-        center_px = self.center_px
+        center = self.center
+        center = Point(center[1], center[0])
         if self.is_vertical:
-            part_1 = [pixel for pixel in self.pixels if pixel.row < center_px.row]
-            part_2 = [pixel for pixel in self.pixels if pixel.row > center_px.row]
+            part_1 = [pixel for pixel in self.pixels if pixel.row < center.row]
+            part_2 = [pixel for pixel in self.pixels if pixel.row > center.row]
 
         elif self.line.slope == 0:
-            part_1 = [pixel for pixel in self.pixels if pixel.col < center_px.col]
-            part_2 = [pixel for pixel in self.pixels if pixel.col > center_px.col]
+            part_1 = [pixel for pixel in self.pixels if pixel.col < center.col]
+            part_2 = [pixel for pixel in self.pixels if pixel.col > center.col]
 
         else:
             p_slope = -1/self.line.slope
-            p_intercept = center_px.row - center_px.col*p_slope
+            p_intercept = center.row - center.col*p_slope
             p_line = lambda point: point.col*p_slope + p_intercept
             part_1 = [pixel for pixel in self.pixels if pixel.row < p_line(pixel)]
             part_2 = [pixel for pixel in self.pixels if pixel.row > p_line(pixel)]

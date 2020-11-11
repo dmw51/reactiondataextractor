@@ -87,7 +87,7 @@ class Diagram(BaseReactionClass, PanelMethodsMixin):
 
     def __eq__(self, other):
         if isinstance(other, Diagram):   # Only compare exact same types
-            return self.panel == other.panel and self.label == other.label and self.smiles == other.smiles
+            return self.panel == other.panel and self.label == other.label
 
     def __hash__(self):
         return hash(self.panel)
@@ -96,7 +96,7 @@ class Diagram(BaseReactionClass, PanelMethodsMixin):
         return f'{self.__class__.__name__}(panel={self.panel}, smiles={self.smiles}, label={self.label})'
 
     def __str__(self):
-        return f'{self.smiles}, label: {self.smiles}'
+        return f'{self.smiles}, label: {self.label}'
 
 
 class ReactionStep(BaseReactionClass):
@@ -181,8 +181,8 @@ class Conditions:
 
         if structure_panels is None:
             structure_panels = []
-        self.structure_panels = structure_panels
-
+        self._structure_panels = structure_panels
+        self.diags = None
         self.text_lines.sort(key=lambda textline: textline.panel.top)
 
     def __repr__(self):
@@ -247,12 +247,9 @@ class Label(PanelMethodsMixin):
         return cls(panel, text)
 
     def __init__(self, panel, text=[], r_group=[]):
-        self._panel = panel
+        self.panel = panel
         self._text = text
         self.r_group = r_group
-    @property
-    def panel(self):
-        return self._panel
 
     @property
     def text(self):
@@ -261,6 +258,16 @@ class Label(PanelMethodsMixin):
     @text.setter
     def text(self, value):
         self._text = value
+
+    def __repr__(self):
+        return f'Label(panel={self.panel}, text={self.text}, r_group={self.r_group})'
+
+    def __hash__(self):
+        return hash(self.panel)
+
+    def __eq__(self, other):
+        return isinstance(other, Label) and self.panel == other.panel
+
 
     def add_r_group_variables(self, var_value_label_tuples):
         """ Updates the R-groups for this label."""

@@ -301,19 +301,7 @@ def bresenham_line_y_dominant(point_1, point_2, slope):
     return Line(pixels=pixels)
 
 
-def create_megabox(boxes):
-    """
-    :param iterable boxes: list of bounding boxes to combine into a larger box
-    :return: megabox
-    """
-    # print('boxes:', boxes)
-    top = min(rect.top for rect in boxes)
-    bottom = max(rect.bottom for rect in boxes)
-    left = min(rect.left for rect in boxes)
-    right = max(rect.right for rect in boxes)
 
-    megabox = boxes[0].__class__(top=top, bottom=bottom, left=left, right=right)
-    return megabox
 
 
 def remove_small_fully_contained(connected_components):
@@ -784,15 +772,3 @@ def is_a_single_line(fig, panel, line_length):
     return is_slope_consistent(lines)
 
 
-def merge_underlying_panels(fig, dilated_panel):
-    """
-    Merges all underlying connected components of ``dilated_panel`` to create a single, large _panel.
-
-    All connected components in ``fig`` that are entirel within the ``dilated`` _panel are merged to create an undilated
-    superpanel (important for standardisation)
-    :param Figure fig: Analysed figure
-    :param Panel dilated_panel: dilated superpanel
-    :return: Panel; undilated superpanel
-    """
-    ccs_to_merge = [cc for cc in fig.connected_components if dilated_panel.contains(cc)]
-    return create_megabox(ccs_to_merge)
