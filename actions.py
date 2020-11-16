@@ -45,60 +45,60 @@ log = logging.getLogger('extract.actions')
 # ch.setLevel(level)
 
 
-def segment(bin_fig, arrows):
-    """
-    Segments the image to return arrows and all remaining connected components
-    :param Figure bin_fig: analysed figure with the image in binary form #Arrows are usually hidden for improved closing
-    :param iterable arrows: list of arrow objects found in the image
-    :return: list of connected components
-    """
-    bin_fig = copy.deepcopy(bin_fig)
-    bbox = bin_fig.get_bounding_box()
-    skel_pixel_ratio = skeletonize_area_ratio(bin_fig, bbox)
-
-    log.debug(" The skeletonized pixel ratio is %s" % skel_pixel_ratio)
-
-    # Choose kernel size according to skeletonized pixel ratio
-    if 0.03 < skel_pixel_ratio:
-        kernel = 4
-        closed_fig = binary_close(bin_fig, size=kernel)
-        log.debug("Segmentation kernel size = %s" % kernel)
-
-    elif 0.025 < skel_pixel_ratio <= 0.03:
-        kernel = 4
-        closed_fig = binary_close(bin_fig, size=kernel)
-        log.debug("Segmentation kernel size = %s" % kernel)
-
-    elif 0.02 < skel_pixel_ratio <= 0.025:
-        kernel = 6
-        closed_fig = binary_close(bin_fig, size=kernel)
-        log.debug("Segmentation kernel size = %s" % kernel)
-
-    elif 0.015 < skel_pixel_ratio <= 0.02:
-        kernel = 10
-        closed_fig = binary_close(bin_fig, size=kernel)
-        log.debug("Segmentation kernel size = %s" % kernel)
-
-    elif 0.01 < skel_pixel_ratio  <=0.015:
-        kernel = 15
-        closed_fig = binary_close(bin_fig, size=kernel)
-        log.debug("Segmentation kernel size = %s" % kernel)
-
-    else:
-        kernel = 25
-        closed_fig = binary_close(bin_fig, size=kernel)
-        log.debug("Segmentation kernel size = %s" % kernel)
-
-    # Using a binary floodfill to identify _panel regions
-    fill_img = binary_floodfill(closed_fig)
-    tag_img = binary_tag(fill_img)
-    panels = get_bounding_box(tag_img)
-
-    # Removing relatively tiny pixel islands that are determined to be noise
-    area_threshold = bin_fig.get_bounding_box().area / 200
-    width_threshold = bin_fig.get_bounding_box().width / 150
-    panels = [panel for panel in panels if panel.area > area_threshold or panel.width > width_threshold]
-    return set(panels)
+# def segment(bin_fig, arrows):
+#     """
+#     Segments the image to return arrows and all remaining connected components
+#     :param Figure bin_fig: analysed figure with the image in binary form #Arrows are usually hidden for improved closing
+#     :param iterable arrows: list of arrow objects found in the image
+#     :return: list of connected components
+#     """
+#     bin_fig = copy.deepcopy(bin_fig)
+#     bbox = bin_fig.get_bounding_box()
+#     skel_pixel_ratio = skeletonize_area_ratio(bin_fig, bbox)
+#
+#     log.debug(" The skeletonized pixel ratio is %s" % skel_pixel_ratio)
+#
+#     # Choose kernel size according to skeletonized pixel ratio
+#     if 0.03 < skel_pixel_ratio:
+#         kernel = 4
+#         closed_fig = binary_close(bin_fig, size=kernel)
+#         log.debug("Segmentation kernel size = %s" % kernel)
+#
+#     elif 0.025 < skel_pixel_ratio <= 0.03:
+#         kernel = 4
+#         closed_fig = binary_close(bin_fig, size=kernel)
+#         log.debug("Segmentation kernel size = %s" % kernel)
+#
+#     elif 0.02 < skel_pixel_ratio <= 0.025:
+#         kernel = 6
+#         closed_fig = binary_close(bin_fig, size=kernel)
+#         log.debug("Segmentation kernel size = %s" % kernel)
+#
+#     elif 0.015 < skel_pixel_ratio <= 0.02:
+#         kernel = 10
+#         closed_fig = binary_close(bin_fig, size=kernel)
+#         log.debug("Segmentation kernel size = %s" % kernel)
+#
+#     elif 0.01 < skel_pixel_ratio  <=0.015:
+#         kernel = 15
+#         closed_fig = binary_close(bin_fig, size=kernel)
+#         log.debug("Segmentation kernel size = %s" % kernel)
+#
+#     else:
+#         kernel = 25
+#         closed_fig = binary_close(bin_fig, size=kernel)
+#         log.debug("Segmentation kernel size = %s" % kernel)
+#
+#     # Using a binary floodfill to identify _panel regions
+#     fill_img = binary_floodfill(closed_fig)
+#     tag_img = binary_tag(fill_img)
+#     panels = get_bounding_box(tag_img)
+#
+#     # Removing relatively tiny pixel islands that are determined to be noise
+#     area_threshold = bin_fig.get_bounding_box().area / 200
+#     width_threshold = bin_fig.get_bounding_box().width / 150
+#     panels = [panel for panel in panels if panel.area > area_threshold or panel.width > width_threshold]
+#     return set(panels)
 
 
 def find_optimal_dilation_ksize(fig=None):
@@ -179,7 +179,7 @@ def find_arrows(fig, min_arrow_length):
 
     if not arrows:
         log.warning('No arrows have been found in the image')
-        raise NoArrowsFoundException('No arrows have been found')
+        raise NoArrowsFoundException('No arrows have been found; aborting.')
 
     return list(set(arrows))
 
@@ -193,27 +193,23 @@ def find_solid_arrows(fig, threshold, min_arrow_length):
     :param int min_arrow_length: threshold length needed to define a line
     :return: collection of arrow objects
     """
+    def inrange(cc, point):
+        """
+        Return True if a ``point`` lies inside ``cc``, else return False.
+        :param Panel cc: Checked panel
+        :param Point point: Checked point
+        :return: bool True if ``point`` is inside the ``cc`` panel, else False
+        """
+        return point.row in range(cc.top, cc.bottom+1) and point.col in range(cc.left, cc.right+1)
+
     img = copy.deepcopy(fig.img)
 
     arrows = []
     skeletonized = skeletonize(fig)
-    all_lines = probabilistic_hough_line(skeletonized.img, threshold=threshold, line_length=min_arrow_length, line_gap=3)
-    for line in all_lines:
-        # for line in all_lines:
-        #     x, y = zip(*line)
-        #     if abs(x[0] - x[1]) > 100:
-        #         print('im the one')
-        # isolated_fig = skeletonize(isolate_patches(fig, [cc]))
-        # cc_lines = probabilistic_hough_line(fig.img, threshold=threshold, line_length=min_arrow_length, line_gap=3)
-        # if len(cc_lines) > 1:
-        #     print('stop')
-        # if not cc_lines or (len(cc_lines) > 1 and not is_slope_consistent(cc_lines)):
-        #     continue
-        # if lines were found, 'break' these down and check again
-        # shorter_lines = probabilistic_hough_line(isolated_fig.img, threshold=threshold//3, line_length=min_arrow_length//3)
-        # if not shorter_lines or (len(shorter_lines) > 1 and not is_slope_consistent(shorter_lines)):
-        #     continue
+    all_lines = probabilistic_hough_line(skeletonized.img, threshold=threshold,
+                                         line_length=min_arrow_length, line_gap=3)
 
+    for line in all_lines:
         points = [Point(row=y, col=x) for x, y in line]
         # Choose one of points to find the label and pixels in the image
         p1, p2 = points
@@ -225,19 +221,15 @@ def find_solid_arrows(fig, threshold, min_arrow_length):
             continue
         else:
             parent_label = labelled_img[p1.row, p1.col]
-            inrange = lambda cc, point: point.row in range(cc.top, cc.bottom+1) and\
-                                        point.col in range(cc.left, cc.right+1)
+
             parent_panel = [cc for cc in fig.connected_components if inrange(cc, p1) and inrange(cc, p2)][0]
+        # Break the line down and check whether it's a single line
         if not is_a_single_line(skeletonized, parent_panel, min_arrow_length//2):
             continue
-        # print('checking p1:...')
-        # print(p1.row, p1. col)
-        # print('should be (96, 226)')
 
         arrow_pixels = np.nonzero(labelled_img == parent_label)
         arrow_pixels = list(zip(*arrow_pixels))
         try:
-
             new_arrow = SolidArrow(arrow_pixels, line=approximate_line(p1, p2), panel=parent_panel)
 
         except NotAnArrowException as e:
@@ -246,53 +238,11 @@ def find_solid_arrows(fig, threshold, min_arrow_length):
             arrows.append(new_arrow)
             parent_cc = [cc for cc in fig.connected_components if cc == new_arrow.panel][0]
             parent_cc.role = FigureRoleEnum.ARROW
-    # lines = probabilistic_hough_line(skeleton, threshold=threshold, line_length=min_arrow_length)
-    #print(lines)
-    # labelled_img, _ = label(img)
-    # arrows =[]
-    # # plt.imshow(fig.img, cmap=plt.cm.binary)
-    # # line1 = list(zip(*lines[0]))
-    # # line2 = list(zip(*lines[1]))
-    # # plt.plot(line1[0], line1[1])
-    # # plt.plot(line2[0], line2[1])
-    # # plt.axis('off')
-    # # plt.show()
-    # # plt.imshow(fig.img, cmap=plt.cm.binary)
-    # # for line in lines:
-    # #     x, y = list(zip(*line))
-    # #     plt.plot(x,y)
-    # # plt.title('detected lines')
-    # # plt.show()
-    #
-    # for l in lines:
-    #     points = [Point(row=y, col=x) for x, y in l]
-    #     # Choose one of points to find the label and pixels in the image
-    #     p1 = points[0]
-    #     p2 = points[1]
-    #     # p1_label = labelled_img[p1.row, p1.col]
-    #     # p2_label = labelled_img[p2.row, p2.col]
-    #     # if p1_label != p2_label: # Hough transform can find lines spanning several close ccs; these are discarded
-    #     #     log.info('A false positive was found when detecting a line. Discarding...')
-    #     #     continue
-    #     #print('checking p1:...')
-    #     #print(p1.row, p1. col)
-    #     #print('should be (96, 226)')
-    #     arrow_label = labelled_img[p1.row, p1.col]
-    #
-    #     arrow_pixels = np.nonzero(labelled_img == arrow_label)
-    #     arrow_pixels = list(zip(*arrow_pixels))
-    #     try:
-    #         new_arrow = SolidArrow(arrow_pixels, line=approximate_line(*points))
-    #     except NotAnArrowException as e:
-    #         log.info('An arrow candidate was discarded - ' + str(e))
-    #     else:
-    #         arrows.append(new_arrow)
-    # Filter poor arrow assignments based on aspect ratio
-    # arrows = [arrow for arrow in arrows if arrow.aspect_ratio >5]  ## This is not valid for tilted arrows
+
     return list(set(arrows))
 
 
-def complete_structures(fig: Figure):
+def complete_structures(fig: Figure, arrows):
     """
     Dilates a figure and uses structural backbones to find complete structures (backbones + superatoms etc.).
 
@@ -300,12 +250,14 @@ def complete_structures(fig: Figure):
     Assuming that this cc is the full (dilated) structure, compares it will all initial overlapping ccs to find original
     full structure in an image. Also assigns roles of all the smaller constituent ccs.
     :param Figure fig: analysed figure
+    :param [Arrow,...] arrows: iterable of all found arrows
     :return: [ReactionStep,...] collection of ReactionStep objects
     """
 
+    fig_no_arrows = erase_elements(fig, arrows)
     backbones = [cc for cc in fig.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
     # dilated_structure_panels, dilated_other = dilate_group_panels(fig, backbones)
-    dilated_structure_panels, other_ccs = find_dilated_structures(fig, backbones)
+    dilated_structure_panels, other_ccs = find_dilated_structures(fig_no_arrows, backbones)
     structure_panels = _complete_structures(fig, dilated_structure_panels)
     _assign_backbone_auxiliaries(fig, (dilated_structure_panels, other_ccs), structure_panels)  # Assigns cc roles
     # settings.main_figure[0] = fig   # This is an awful way to do it, losing conditions info (look at input fig)
@@ -319,6 +271,8 @@ def complete_structures(fig: Figure):
                     structure_panels.remove(panel1)
                 except ValueError:
                     pass
+
+    structure_panels = [panel for panel in structure_panels if panel.aspect_ratio + 1/panel.aspect_ratio < 10]
     return list(set(structure_panels))
 
 
@@ -696,12 +650,10 @@ def detect_structures(fig ):
     # Get a rough bond length (line length) value from the two largest structures
     ccs = sorted(ccs, key=lambda cc: cc.area, reverse=True)
     estimation_fig = skeletonize(isolate_patches(fig, ccs[:2]))
+
     length_scan_param = 0.025 * max(fig.width, fig.height)
-    # length_scan_param = np.percentile([cc.height for cc in fig.connected_components], 50)   # exclude common characters
     length_scan_start = length_scan_param if length_scan_param > 20 else 20
     min_line_lengths = np.linspace(length_scan_start, 3*length_scan_start, 20)
-    # print(min_line_lengths)
-    # min_line_lengths = list(range(20, 60, 2))
     num_lines = [(length, len(probabilistic_hough_line(estimation_fig.img, line_length=int(length), threshold=15))**2)
                     for length in min_line_lengths]
     # Choose the value where the number of lines starts to drop most rapidly and assign it as the boundary length
@@ -745,16 +697,8 @@ def detect_structures(fig ):
     print(f'mean sqrt area: {np.sqrt(mean_area)}')
 
     data = np.hstack((cc_lines, area, aspect_ratio))
-    # print(f'data: \n {data}')
-    # print(f'data: {data}')
+
     data = MinMaxScaler().fit_transform(data)
-    distances = np.array([(x, y, z, np.sqrt(np.sqrt(x**2 + y**2)+z**2)) for x,y,z in data])
-    # print(f'transformed: \n {distances}')
-    # print(f'transformed: {data}')
-    # print(f'distances: {distances}')
-    # data = data.clip(min=0)
-    # data = cc_lines
-    # print(f'data: {data}')
 
     labels = DBSCAN(eps=0.08, min_samples=20).fit_predict(data)
 

@@ -183,8 +183,13 @@ class LabelAssigner:
         return clusters_merged
 
     def _assess_potential_labels(self, label_clusters, structure):
+        # check if valid and filter
         potential_labels = list(filter(lambda label: label is not None,
                                        [self.check_label_validity(cluster) for cluster in label_clusters]))
+
+        # check if the label is not approximately in line with the structure (i.e. a balancing number)
+        potential_labels = [label for label in potential_labels if
+                            abs(label.panel.center[1] - structure.center[1]) > 0.15 * structure.height]
         clusters_underneath = [cluster for cluster in potential_labels
                                if cluster.center[1] > structure.center[1]]
         if clusters_underneath:
@@ -208,10 +213,12 @@ class LabelAssigner:
     def _find_seed_ccs(self, structure):
         """Finds the closest connected components that are a potential label or their parts"""
         non_structures = [cc for cc in self.fig.connected_components
-                          if cc.role != FigureRoleEnum.STRUCTUREAUXILIARY
-                          and cc.role != FigureRoleEnum.STRUCTUREBACKBONE]
+                          if cc.role not in
+                          [FigureRoleEnum.STRUCTUREBACKBONE, FigureRoleEnum.STRUCTUREAUXILIARY, FigureRoleEnum.TINY]]
         cutoff = max([structure.width, structure.height]) * 1.25
         close_ccs = sorted(non_structures, key=lambda cc: structure.separation(cc))
+        all_structures = self.conditions_structures + self.react_prods_structures
+        close_ccs = [cc for cc in close_ccs if not any(structure.contains(cc) for structure in all_structures)]
         close_ccs = [cc for cc in close_ccs if structure.separation(cc) < cutoff]
         return close_ccs
 

@@ -60,6 +60,7 @@ class FigureRoleEnum(Enum):
     STRUCTUREAUXILIARY = 6   # Either a solitary bond-line (e.g. double bond) ar a superatom label
     BONDLINE = 7
     OTHER = 8
+    TINY = 9   # Used for tiny ccs that have not been assigned (noise or small dots)
 
 
 class ReactionRoleEnum(Enum):

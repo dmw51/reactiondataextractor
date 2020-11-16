@@ -10,6 +10,7 @@ import os
 
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
+import numpy as np
 from PIL import Image, ImageOps
 
 from actions import (detect_structures, find_arrows, complete_structures,
@@ -62,9 +63,8 @@ def extract_image(filename, debug=False):
     # global_skel_pixel_ratio = skeletonize_area_ratio(fig, fig.get_bounding_box())
     arrows = find_arrows(fig, int(fig.boundary_length))
     log.info('Detected %d arrows' % len(arrows))
-
-    structure_panels = complete_structures(fig)
-
+    structure_panels = complete_structures(fig, arrows)
+    log.info('Found %d structure panels' % len(structure_panels))
     #### Hide the following inside a function
     conditions, conditions_structures = zip(*[get_conditions(fig, arrow) for arrow in arrows])
     conditions_structures = [panel for step_panels in conditions_structures for panel in step_panels]
@@ -74,11 +74,12 @@ def extract_image(filename, debug=False):
     ####
     for step_conditions in conditions:
         log.info('Conditions dictionary found: %s' % step_conditions.conditions_dct)
-
+    [setattr(cc, 'role', FigureRoleEnum.TINY) for cc in fig.connected_components if
+     cc.area < np.percentile([cc.area for cc in fig.connected_components], 4) and cc.role is None]
     fig_no_cond = clear_conditions_region(fig)
 
 
-    log.info('Found %d structure panels' % len(structure_panels))
+
 
 
     # fig_clean = remove_redundant_characters(fig_no_cond, fig_no_cond.connected_components)
@@ -100,12 +101,16 @@ def extract_image(filename, debug=False):
         if step_conditions._structure_panels:
             cond_diags = [diag for diag in diags if diag.panel in step_conditions._structure_panels]
             step_conditions.diags = cond_diags
-            step_conditions.conditions_dct['other species'].extend([diag.smiles for diag in cond_diags if diag.smiles])
+            try:
+                step_conditions.conditions_dct['other species'].extend([diag.smiles for diag in cond_diags if diag.smiles])
+            except KeyError:
+                step_conditions.conditions_dct['other species'] = [diag.smiles for diag in cond_diags if diag.smiles]
+
     ####
     steps = [scan_form_reaction_step(step_conditions, diags) for step_conditions in conditions]
     log.info('SMILES-structure matching complete.')
     if debug:
-        colors = ['r', 'g', 'y', 'm', 'b', 'c', 'k']
+        colors = ['r', 'g', 'y', 'm', 'b', 'c', 'k', 'y', 'r', 'm']
 
         f = plt.figure()
         ax = f.add_axes([0.1, 0.1, 0.9, .9])
@@ -142,5 +147,3 @@ def extract_image(filename, debug=False):
 
     settings.main_figure = []
     return scheme
-
-print()

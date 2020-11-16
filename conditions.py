@@ -101,7 +101,8 @@ class ConditionParser:
         # cems = [cem.text for cem in cems]
         formulae_brackets = r'((?:[A-Z]*\d?[a-z]\d?)\((?:[A-Z]*\d?[a-z]?\d?)*\)?\d?[A-Z]*[a-z]*\d?)*'
         formulae_bracketless = r'(?<!°)\b(?<!\)|\()((?:[A-Z]+\d?[a-z]?\d?)+)(?!\(|\))\b'
-        letter_base_identifiers = r'((?<!°)\b[A-Z]{1,4}\b)'  # Up to four capital letters? Just a single one?
+        letter_upper_identifiers = r'((?<!°)\b[A-Z]{1,4}\b)(?!\)|\.)'  # Up to four capital letters? Just a single one?
+        letter_lower_identifiers = r'(\b[a-z]\b)(?!\)|\.)'  # Accept single lowercase letter subject to restrictions
 
         number_identifiers = r'(?:^| )(?<!\w)([1-9])(?!\w)(?!\))(?:$|[, ])(?![A-Za-z])'
         # number_identifiers matches the following:
@@ -111,18 +112,24 @@ class ConditionParser:
         # A 5 equiv -no matches
         entity_mentions_brackets = re.finditer(formulae_brackets, sentence.text)
         entity_mentions_bracketless = re.finditer(formulae_bracketless, sentence.text)
-        entity_mentions_letters = re.finditer(letter_base_identifiers, sentence.text)
+        entity_mentions_letters_upper = re.finditer(letter_upper_identifiers, sentence.text)
+        entity_mentions_letters_lower = re.finditer(letter_lower_identifiers, sentence.text)
 
         entity_mentions_numbers = re.finditer(number_identifiers, sentence.text)
 
         spans = [Span(e.group(1), e.start(), e.end()) for e in
-                                chain(entity_mentions_brackets, entity_mentions_bracketless,
-                                      entity_mentions_numbers, entity_mentions_letters) if e.group(1)]
+                 chain(entity_mentions_brackets, entity_mentions_bracketless,
+                       entity_mentions_numbers, entity_mentions_letters_upper,
+                       entity_mentions_letters_lower) if e.group(1)]
+        slashed_names = []
+        for token in sentence.tokens:
+            if '/' in token.text:
+                slashed_names.append(token)
 
-        all_mentions = [mention for mention in spans]
+        all_mentions = ConditionParser._resolve_spans(spans+slashed_names)
         # Add species from the list, treat them as seeds - allow more complex names
         # eg. based on 'pentanol' on the list, allow '1-pentanol'
-        species_from_list = [token for token in sentence.tokens if any(species in token.text for species in species_list
+        species_from_list = [token for token in sentence.tokens if any(species in token.text.lower() for species in species_list
                                                                        if species)]  # except ''
         all_mentions += species_from_list
         return list(set(all_mentions))
@@ -241,6 +248,25 @@ class ConditionParser:
                     unaccounted.append(species)
             return list(set(unaccounted))
 
+    @staticmethod
+    def _resolve_spans(spans):
+        span_copy = spans.copy()
+        # spans is ~10-15 elements long at most
+        for span1 in spans:
+            for span2 in spans:
+                if span1.text != span2.text:
+                    if span1.text in span2.text:
+                        try:
+                            span_copy.remove(span1)
+                        except ValueError:
+                            pass
+                    elif span2.text in span1.text:
+                        try:
+                            span_copy.remove(span2)
+                        except ValueError:
+                            pass
+
+        return span_copy
 
 
     @staticmethod
@@ -255,6 +281,7 @@ class ConditionParser:
 
     @staticmethod
     def _parse_temperature(sentence):
+
         # The following formals grammars for temperature and pressure are quite complex, but allow to parse additional
         # generic descriptors like 'heat' or 'UHV' in `.group(1)'
         t_units = r'\s?(?:o|O|0|°)C|K'   # match 0C, oC and similar, as well as K
@@ -306,7 +333,6 @@ class ConditionParser:
                 return {'Value': float(y.group(1)), 'Units': units}
             except ValueError:
                 return {'Value': y.group(1), 'Units': units}   # if value is 'gram scale'
-
 
 
 def get_conditions(fig, arrow):
@@ -1002,3 +1028,6 @@ def clear_conditions_region(fig):
     noise = [panel for panel in fig_no_cond.connected_components if panel.area < area_threshold]
 
     return erase_elements(fig_no_cond, noise)
+
+
+
