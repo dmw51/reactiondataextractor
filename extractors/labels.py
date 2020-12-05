@@ -1,32 +1,36 @@
-"""This module contains functionalities associated with resolving chemical schematic diagrams and their labels
-as well as optical chemical structure recognition calls"""
-import logging
-import itertools
-import numpy as np
-import settings
+# -*- coding: utf-8 -*-
+"""
+Labels
+======
 
-from actions import find_nearby_ccs, dilate_fragments
-from models.segments import ReactionRoleEnum, FigureRoleEnum, Panel, Rect, coords_deco, Crop
-from models.reaction import Diagram, Label
+This module contains LabelExtractor and methods concerning label assignment, as well as other classes
+for RGroup resolution
 
+author: Damian Wilary
+email: dmw51@cam.ac.uk
 
+Code snippets for merging loops and RGroup and RGroupResolver taken from chemschematicresolver (MIT licence) by Edward
+Beard (ejb207@cam.ac.uk)
+
+"""
 import csv
-import cirpy
 import itertools
+import logging
+from matplotlib.patches import Rectangle
 import os
-
-
-from ocr import ASSIGNMENT, SEPARATORS, CONCENTRATION
-
 import re
-from skimage.util import pad
 from urllib.error import URLError
 
 from chemdataextractor.doc.text import Token
+import cirpy
 
+from models.reaction import Diagram, Label
+from models.segments import ReactionRoleEnum, FigureRoleEnum, Panel, Rect, Crop
+from ocr import ASSIGNMENT, SEPARATORS, CONCENTRATION, read_label
+from utils.processing import dilate_fragments
+import settings
 
-from ocr import read_label
-log = logging.getLogger(__name__)
+log = logging.getLogger('extract.labels')
 
 BLACKLIST_CHARS = ASSIGNMENT + SEPARATORS + CONCENTRATION
 
@@ -35,67 +39,86 @@ NUMERIC_REGEX = re.compile('^\d{1,3}$')
 ALPHANUMERIC_REGEX = re.compile('^((d-)?(\d{1,2}[A-Za-z]{1,2}[′″‴‶‷⁗]?)(-d))|(\d{1,3})?$')
 
 # Commonly occuring tokens for R-Groups:
-r_group_indicators = ['R', 'X', 'Y', 'Z', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'Y2', 'D', "R'", "R''", "R'''", "R''''"]
+r_group_indicators = ['R', 'X', 'Y', 'Z', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'Y2', 'D', "R'",
+                      "R''", "R'''", "R''''"]
 r_group_indicators = r_group_indicators + [val.lower() for val in r_group_indicators]
 
 # Standard path to superatom dictionary file
 parent_dir = os.path.dirname(os.path.abspath(__file__))
-superatom_file = os.path.join(parent_dir, 'dict', 'superatom.txt')
-spelling_file = os.path.join(parent_dir, 'dict', 'spelling.txt')
+superatom_file = os.path.join(parent_dir, '..', 'dict', 'superatom.txt')
+spelling_file = os.path.join(parent_dir, '..', 'dict', 'spelling.txt')
 
 
-class LabelAssigner:
-    """This class is responsible for finding labels and assigning them to appropriate chemical diagrams"""
+class LabelExtractor:
+    """This class is responsible for finding labels and assigning them to appropriate chemical diagrams. As opposed to
+        other extractors, this gives diagrams with appropriately assigned labels"""
 
-    def __init__(self, processed_fig, react_prods_structures, conditions_structures, cutoff=None, confidence_thresh=0.5):
+    def __init__(self, processed_fig, react_prods_structures, conditions_structures, confidence_thresh=0.5):
         self.fig = processed_fig
-        self._dilated = False  # dilate fig to reduce computation time of panel merging
         self.react_prods_structures = react_prods_structures
         self.conditions_structures = conditions_structures
         self._dilated_fig = self._dilate_fig()
         self.confidence_threshold = confidence_thresh
+        self._extracted = None
 
-    def create_diagrams(self):
+    def extract(self):
+        """Main extraction method"""
         diagrams = [Diagram(panel=structure, label=self.find_label(structure), crop=Crop(self.fig, structure))
                     for structure in self.react_prods_structures]
         diagrams_conditions = [Diagram(panel=structure, label=None, crop=Crop(self.fig, structure))
                                for structure in self.conditions_structures]
         all_diagrams = diagrams + diagrams_conditions
         all_diagrams = self.resolve_labels(all_diagrams)
-        return all_diagrams
+        self._extracted = all_diagrams
+        return self.extracted
+
+    @property
+    def extracted(self):
+        """Returns extracted objects"""
+        return self._extracted
+
+    def plot_extracted(self, ax):
+        """Adds extracted panels onto a canvas of ``ax``"""
+        params = {'facecolor': (66 / 255, 93 / 255, 166 / 255),
+                  'edgecolor': (6 / 255, 33 / 255, 106 / 255),
+                  'alpha': 0.4}
+        for diag in self._extracted:
+            if diag.label:
+                panel = diag.label.panel
+                rect_bbox = Rectangle((panel.left - 1, panel.top - 1), panel.right - panel.left,
+                                      panel.bottom - panel.top, **params)
+                ax.add_patch(rect_bbox)
 
     def find_label(self, structure):
-        """Finds a label for each structure. if multiple distinct potential label regions are found, resolves them
-        by first merging adjacent chracters and then looking for the closest merged label"""
+        """Finds a label for each structure.
+
+        First, looks for small connected components around a structure, and expands them by combining with nearby ccs.
+        This is done first by looking at a dilated figure and then by further merging with slightly more distant ccs.
+        Label candidates are then checked and normalised to give panels independent of the kernel size used in
+        the dilated figure.
+        :param Panel structure: panel containing a chemical structure
+        :return: label associated with the chemical structure
+        :rtype: Label"""
         seeds = self._find_seed_ccs(structure)
         clusters_ccs = []
         if seeds:
             for seed in seeds:
                 clusters_ccs += self._expand_seed(seed)
 
-            label_clusters = self._merge_into_cluters(clusters_ccs)
+            label_clusters = self._merge_into_clusters(clusters_ccs)
             label = self._assess_potential_labels(label_clusters, structure)
             if label:
                 label.panel = label.merge_underlying_panels(self.fig)
                 return label
-            # while label_clusters:  # Try all clusters, starting from the closest one
-            #     # TODO: merging should occur just once, before this loop
-            #     label_cluster = min(label_clusters, key=lambda sd: sd.separation(structure))
-            #     label_clusters = [cluster for cluster in label_clusters if not label_cluster == cluster]
-            #     label = Label(label_cluster)
-            #     recognised = self.check_label_validity(label)
-            #     if recognised:
-            #         break
-            # if not recognised:
-            #     return None
-            # else:
-            #     label.panel = label.merge_underlying_panels(self.fig)
-            #     return label
 
+    def check_if_plausible_label(self, panel):
+        """Checks if ``panel`` is a valid label candidate
 
-
-    def check_label_validity(self, label):
-        label = Label(label)
+        Reads text inside ``panel``. Discards obvious false positives and panels with poor OCR outcomes.
+        :param Panel panel: checked panel
+        :return: label and its associated text or None if panel is not a valid candidate
+        :rtype: Label|None"""
+        label = Label(panel)
         text, conf = read_label(settings.main_figure[0], label)
 
         if not text and conf == 0:
@@ -103,7 +126,7 @@ class LabelAssigner:
             return None
 
         elif conf < self.confidence_threshold:
-            log.info('label recognition failed - recognition confidence below threshold')
+            log.debug('label recognition failed - recognition confidence below threshold')
             label.text = []
             return label
 
@@ -112,16 +135,18 @@ class LabelAssigner:
             return label
 
     def resolve_labels(self, diags):
-        """Used for resolving labels that have been assigned to multiple diagrams
-        :param [Diagram,...] diags: iterable of chemical Diagrams
-        :return [Diagram,...]: iterable of mutated diagrams - with appropriate ``label``s set to None
-
+        """Resolves labels assigned to multiple diagrams. Clears labels where assignment is incorrect.
 
         Pools all labels, then checks them one by one. If any label is assigned to multiple diagrams, reassigns it
-        to the closest diagram, clears labels from the other diagrams."""
+        to the closest diagram, clears labels from the other diagrams.
+        :param [Diagram,...] diags: iterable of chemical Diagrams
+        :return: mutated diagrams - with appropriate ``label``s set to None
+        :rtype: list
+        """
         all_labels = set([diag.label for diag in diags if diag.label])
         for label in all_labels:
             parent_diags = [diag for diag in diags if diag.label == label]
+
             if len(parent_diags) > 1:
                 closest = min(parent_diags, key=lambda diag: diag.separation(label.panel))
                 [setattr(diag, 'label', None) for diag in parent_diags if diag != closest]
@@ -129,7 +154,7 @@ class LabelAssigner:
         return diags
 
     def merge_label_horizontally(self, merge_candidates):
-        """ Iteratively attempt to merge horizontally
+        """ Iteratively attempt to merge horizontally.
 
         :param merge_candidates: Input list of Panels to be merged
         :return merge_candidates: List of Panels after merging
@@ -146,7 +171,7 @@ class LabelAssigner:
         return merge_candidates
 
     def merge_labels_vertically(self, merge_candidates):
-        """ Iteratively attempt to merge vertically
+        """ Iteratively attempt to merge vertically.
 
         :param merge_candidates: Input list of Panels to be merged
         :return merge_candidates: List of Panels after merging
@@ -160,7 +185,7 @@ class LabelAssigner:
         return merge_candidates
 
     def merge_all_overlaps(self, panels):
-        """ Merges all overlapping rectangles together
+        """ Merges all overlapping rectangles together.
 
         :param panels : Input list of Panels
         :return output_panels: List of merged panels
@@ -176,7 +201,7 @@ class LabelAssigner:
         output_panels = self._retag_panels(panels)
         return output_panels, all_merged
 
-    def _merge_into_cluters(self, clusters_ccs):
+    def _merge_into_clusters(self, clusters_ccs):
         label_ccs = list(set(clusters_ccs))
         clusters_merged_horizontally = self.merge_label_horizontally(label_ccs)
         clusters_merged = self.merge_labels_vertically(clusters_merged_horizontally)
@@ -185,7 +210,7 @@ class LabelAssigner:
     def _assess_potential_labels(self, label_clusters, structure):
         # check if valid and filter
         potential_labels = list(filter(lambda label: label is not None,
-                                       [self.check_label_validity(cluster) for cluster in label_clusters]))
+                                       [self.check_if_plausible_label(cluster) for cluster in label_clusters]))
 
         # check if the label is not approximately in line with the structure (i.e. a balancing number)
         potential_labels = [label for label in potential_labels if
@@ -218,31 +243,18 @@ class LabelAssigner:
         cutoff = max([structure.width, structure.height]) * 1.25
         close_ccs = sorted(non_structures, key=lambda cc: structure.separation(cc))
         all_structures = self.conditions_structures + self.react_prods_structures
-        close_ccs = [cc for cc in close_ccs if not any(structure.contains(cc) for structure in all_structures)]
+        close_ccs = [cc for cc in close_ccs if not any([s.contains(cc) and s != structure for s in all_structures ])]
         close_ccs = [cc for cc in close_ccs if structure.separation(cc) < cutoff]
         return close_ccs
 
     def _expand_seed(self, seed):
         """Looks at the dilated panels and chooses those which contain the seeds"""
-        # initial_distance = np.sqrt(np.mean([cc.area for cc in self.fig.connected_components]))
-        # condition = lambda cc: cc.role == seed.role
-        # nearby_chars = find_nearby_ccs(seed, self.fig.connected_components,
-        #                                (initial_distance, settings.DISTANCE_FN_CHARS), condition=condition)
-        #
-        # char_cluster = nearby_chars + [seed]
         char_cluster = [cc for cc in self._dilated_fig.connected_components
-                        if cc.contains(seed) if cc.role != ReactionRoleEnum.GENERIC_STRUCTURE_DIAGRAM]
+                        if cc.contains(seed) and cc.role != ReactionRoleEnum.GENERIC_STRUCTURE_DIAGRAM]
         return char_cluster
 
     def _merge_loop_horizontal(self, panels,):
-        """ Iteratively merges panels by relative proximity to each other along the x axis.
-            This is repeated until no panels are merged by the algorithm
-
-        :param panels: List of Panels to be merged.
-
-        :return output_panels: List of merged panels
-        :return done: Bool indicating whether a merge occurred
-        """
+        """ Iteratively merges panels by relative proximity to each other along the x axis."""
 
         output_panels = []
         blacklisted_panels = []
@@ -275,14 +287,7 @@ class LabelAssigner:
         return output_panels, done
 
     def _merge_loop_vertical(self, panels):
-        """ Iteratively merges panels by relative proximity to each other along the y axis.
-            This is repeated until no panels are merged by the algorithm
-
-        :param panels: List of Panels to be merged.
-
-        :return output_panels: List of merged panels
-        :return done: Bool indicating whether a merge occurred
-        """
+        """ Iteratively merges panels by relative proximity to each other along the y axis."""
 
         output_panels = []
         blacklisted_panels = []
@@ -290,10 +295,10 @@ class LabelAssigner:
         # Merging labels that are in close proximity vertically
         for a, b in itertools.combinations(panels, 2):
 
-            if (abs(a.left - b.left) < 3 * min(a.height, b.height) or abs(a.center[0] - b.center[0]) < 3 * min(a.height,
-                                                                                                               b.height)) \
+            if (abs(a.left - b.left) <  min(a.width, b.width) or abs(a.center[0] - b.center[0]) <  min(a.width,
+                                                                                                               b.width)) \
                     and abs(a.center[1] - b.center[1]) < 3 * min(a.height, b.height) \
-                    and min(abs(a.top - b.bottom), abs(b.top - a.bottom)) < 2 * min(a.height, b.height):
+                    and min(abs(a.top - b.bottom), abs(b.top - a.bottom)) < 1.75 * min(a.height, b.height):
                 merged_rect = self._merge_rect(a, b)
                 merged_panel = Panel(merged_rect.left, merged_rect.right, merged_rect.top, merged_rect.bottom, 0)
                 output_panels.append(merged_panel)
@@ -308,14 +313,7 @@ class LabelAssigner:
         return output_panels
 
     def _get_one_to_merge(self, all_combos, panels):
-        """Merges the first overlapping set of panels found and an returns updated _panel list
-
-        :param all_combos: List of Tuple(Panel, Panel) objects of all possible combinations of the input 'panels' variable
-        :param panels: List of input Panels
-
-        :return panels: List of updated panels after one overlap is merged
-        :return: Bool indicated whether all overlaps have been completed
-        """
+        """Merges the first overlapping set of panels found and an returns updated _panel list"""
 
         for a, b in all_combos:
 
@@ -337,12 +335,7 @@ class LabelAssigner:
             return self._merge_rect(a, b)
 
     def _merge_rect(self, rect1, rect2):
-        """ Merges rectangle with another, such that the bounding box enclose both
-
-        :param Rect rect1: A rectangle
-        :param Rect rect2: Another rectangle
-        :return: Merged rectangle
-        """
+        """ Merges rectangle with another, such that the bounding box enclose both"""
 
         left = min(rect1.left, rect2.left)
         right = max(rect1.right, rect2.right)
@@ -372,8 +365,6 @@ class RGroupResolver:
         for diag in self.diagrams:
             if diag.label and diag.label.text:
                 self.detect_r_group(diag)
-
-
 
 
     def detect_r_group(self, diag):
@@ -441,7 +432,7 @@ class RGroupResolver:
         table_identifier, table_rows = sentences[0], sentences[1:]
 
         variables = table_identifier.tokens
-        log.info('R-Group table format detected. Variable candidates are %s' % variables)
+        log.debug('R-Group table format detected. Variable candidates are %s' % variables)
 
         # Check that the length of all table rows is the same as the table_identifier + 1
         correct_row_lengths = [True for row in table_rows if len(row.tokens) == len(variables) + 1]
@@ -511,11 +502,11 @@ class RGroupResolver:
 
         for i, token in enumerate(sentence.tokens):
             if token.text is indicator:
-                log.info('Found R-Group descriptor %s' % token.text)
+                log.debug('Found R-Group descriptor %s' % token.text)
                 if i > 0:
-                    log.info('Variable candidate is %s' % sentence.tokens[i - 1])
+                    log.debug('Variable candidate is %s' % sentence.tokens[i - 1])
                 if i < len(sentence.tokens) - 1:
-                    log.info('Value candidate is %s' % sentence.tokens[i + 1])
+                    log.debug('Value candidate is %s' % sentence.tokens[i + 1])
 
                 if 0 < i < len(sentence.tokens) - 1:
                     variable = sentence.tokens[i - 1]
@@ -523,7 +514,7 @@ class RGroupResolver:
                     var_value_pairs.append(RGroup(variable, value, []))
 
             elif token.text == 'or' and var_value_pairs:
-                log.info('"or" keyword detected. Assigning value to previous R-group variable...')
+                log.debug('"or" keyword detected. Assigning value to previous R-group variable...')
 
                 # Identify the most recent var_value pair
                 variable = var_value_pairs[-1].var

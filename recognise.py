@@ -1,20 +1,38 @@
-"""This module contains optical chemical structure recognition tools and routines"""
+# -*- coding: utf-8 -*-
+"""
+Recognise
+========
+
+This module contains optical chemical structure recognition tools and routines.
+
+author: Damian Wilary
+email: dmw51@cam.ac.uk
+
+Recognition is achieved using OSRA and performed via a pyOsra wrapper.
+"""
 import os
-import logging
 import itertools
+import logging
+
 from skimage.util import pad
 
+import osra_rgroup
 import utils.io_ as io_
 from utils.processing import clean_output
-import osra_rgroup
+
 log = logging.getLogger()
 parent_dir = os.path.dirname(os.path.abspath(__file__))
-superatom_file = os.path.join(parent_dir, 'dict', 'superatom.txt')
-spelling_file = os.path.join(parent_dir, 'dict', 'spelling.txt')
+superatom_file = os.path.join(parent_dir, '..', 'dict', 'superatom.txt')
+spelling_file = os.path.join(parent_dir, '..', 'dict', 'spelling.txt')
 
 
 class DiagramRecogniser:
-    """Used to optical chemical structure recognition of diagrams"""
+    """Used to optical chemical structure recognition of diagrams
+
+    :param diagrams: extracted chemical diagrams
+    :type diagrams: list[Diagram]
+    :param allow_wildcards: whether to allow or discard partially recognised diagrams
+    :type allow_wildcards: bool"""
 
     def __init__(self, diagrams, allow_wildcards=False):
         self.diagrams = diagrams
@@ -22,6 +40,8 @@ class DiagramRecogniser:
         self._tag_multiple_r_groups()
 
     def recognise_diagrams(self):
+        """Main recognition method. Dispatches recognition to one of two routines depending on whether generic R-groups
+        were detected"""
         for diag in self.diagrams:
             if diag.r_groups:
                 diag.smiles = self._get_rgroup_smiles(diag)
@@ -84,13 +104,7 @@ class DiagramRecogniser:
         if not debug:
             io_.imdel(img_name)
 
-        # smiles = [actions.clean_output(smile) for smile in smiles]
         return smiles
-        # labels_and_smiles = []
-        # for i, smile in enumerate(smiles):
-        #     labels_and_smiles.append((label_cands[i], smile))
-        #
-        # return labels_and_smiles
 
     def _read_diagram_pyosra(self, diag, extension='jpg', debug=False, pad_val=1, superatom_path=superatom_file,
                             spelling_path=spelling_file):
@@ -108,8 +122,6 @@ class DiagramRecogniser:
             img = diag_crop.clean_raw_img
         else:
             img = diag_crop.raw_img
-        # label = transform_panel_coordinates_to_shrunken_region(diag.crop.cropped_rect, [diag.label])[0]
-        # img = erase_elements(img, [label], 1)
         # Add some padding to image to help resolve characters on the edge
         if len(img.shape) == 3:
             padded_img = pad(img, ((20, 20), (20, 20), (0, 0)), mode='constant', constant_values=pad_val)
@@ -135,7 +147,6 @@ class DiagramRecogniser:
 
         smile = clean_output(smile)
         return smile
-
 
     def is_false_positive(self, diag, allow_wildcards=False):
         """ Identifies failures from incomplete / invalid smiles

@@ -1,3 +1,14 @@
+# -*- coding: utf-8 -*-
+"""
+Processing
+==========
+
+This module contains low level I/O routines.
+
+author: Damian Wilary
+email: dmw51@cam.ac.uk
+
+"""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -29,6 +40,8 @@ def imread(filepath, bin_thresh=0.85):
         img = img/255
     img = img < bin_thresh
     return Figure(img, raw_img=raw_img)
+
+
 
 def imsave(f, img):
     """Save an image to file.

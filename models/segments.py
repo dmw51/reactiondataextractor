@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Model
-=====
+Segments
+=======
 
 Models created to identify different regions of a chemical schematic diagram.
 
-Module adapted by :-
+Module expanded by :-
 author: Damian Wilary
 email: dmw51@cam.ac.uk
 
 Previous adaptation:-
 author: Ed Beard
 email: ejb207@cam.ac.uk
-
-from FigureDataExtractor (<CITATION>) :-
+and
 author: Matthew Swain
 email: m.swain@me.com
 
@@ -22,8 +21,7 @@ email: m.swain@me.com
 
 from __future__ import absolute_import
 from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+
 
 from collections.abc import Collection
 from enum import Enum
@@ -32,10 +30,7 @@ import logging
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-#Remove Python2 compatibility?
-#from . import decorators
-from itertools import product
-from utils.rectangles import create_megabox
+
 import numpy as np
 import scipy.ndimage as ndi
 from skimage.measure import regionprops
@@ -44,8 +39,24 @@ from models.utils import Line, Point
 import settings
 
 
+log = logging.getLogger('extract.segments')
 
-log = logging.getLogger(__name__)
+
+def coords_deco(cls):
+    """Decorator allowing accessing coordinates of panels directly from objects that have ``panel`` attributes"""
+    for coord in ['left', 'right', 'top', 'bottom']:
+        def fget(self, coordinate=coord):
+            panel = getattr(self, 'panel')
+            return getattr(panel, coordinate)
+        prop = property(fget)
+        setattr(cls, coord, prop)
+
+    @wraps(cls)
+    def wrapper(*args, **kwargs):
+        return cls(*args, **kwargs)
+
+    return wrapper
+
 
 class FigureRoleEnum(Enum):
     """
@@ -68,8 +79,9 @@ class ReactionRoleEnum(Enum):
     Enum used to mark panels (sometimes composed from a set of dilated connected components) in a figure.
 
     Original ccs are well described using the above ``FigureRoleEnum`` and hence this enum is only used for panels in
-    dilated figure - in particular, to describe which structures are reactants and products, and which form part of the
-    conditions region. ``ARROW`` and ``LABEL`` describe (if needed) corresponding dilated arrows and label regions
+    (or coming from) dilated figure - in particular, to describe which structures are reactants and products,
+    and which form part of the conditions region. ``ARROW`` and ``LABEL`` describe (if needed) corresponding
+    dilated arrows and label regions
     """
     ARROW = 1
     CONDITIONS = 2
@@ -79,61 +91,11 @@ class ReactionRoleEnum(Enum):
     STEP_PRODUCT = 10
 
 
-# class CoordsDeco:
-#     """ Adds ''left'', ''right'' etc. properties to classes with ''panel'' attributes"""
-#     def __init__(self, cls):
-#         self.cls = cls
-#
-#     def __call__(self, *args, **kwargs):
-#         self.cls.__init__(*args, **kwargs)
-#         if hasattr(self.cls, 'panel'):
-#             left = lambda self: self.panel.left
-#             left = property(left)
-#             right = lambda self: self.panel.right
-#             right = property(right)
-#             top = lambda self: self.panel.top
-#             top = property(top)
-#             bottom = lambda self: self.panel.bottom
-#             bottom = property(bottom)
-#         return cls
-
-def coords_deco(cls):
-    for coord in ['left', 'right', 'top', 'bottom']:
-        def fget(self, coord=coord):
-            panel = getattr(self, 'panel')
-            return getattr(panel, coord)
-        prop = property(fget)
-        setattr(cls, coord, prop)
-
-    @wraps(cls)
-    def wrapper(*args, **kwargs):
-        return cls(*args, **kwargs)
-
-    return wrapper
-
-
 class PanelMethodsMixin:
-    """If an attribute is not found in the usual places, try to look it up inside ``panel`` attribute"""
+    """If an attribute is not found in the usual places, try to look it up inside ``panel`` attribute. Used for
+    backward compatibility"""
     def __getattr__(self, item):
         return self.panel.__getattribute__(item)
-
-
-
-# def panel_method_deco(method_names):
-#     def deco(cls):
-#         for method in method_names:
-#             def fget(self, method=method):
-#                 panel = getattr(self, 'panel')
-#                 return getattr(panel, method)
-#             prop = property(fget)
-#             setattr(cls, method, prop)
-#
-#         @wraps(cls)
-#         def wrapper(*args, **kwargs):
-#             return cls(*args, **kwargs)
-#
-#         return wrapper
-#     return deco
 
 
 class Rect(object):
@@ -141,43 +103,23 @@ class Rect(object):
     A rectangular region.
     Base class for all panels.
     """
+
     @classmethod
-    def from_points(cls, points, greedy=False):
+    def create_megarect(cls, boxes):
         """
-        Create a rectangle given 4 points. Points can be either an iterable of (x,y) tuples (note order),
-        np.ndarray of (x,y) or iterable of `Points`.
-        note: this method will produce unexpected output if more than 4 points are supplied.
-        :param [(x,y),...] or [Point,...] points: iterable of points from which a `Rect` is constructed
-        :param bool greedy: if True, the extrema of approximated polygon are taken, averages if False
-        :return: formed `Rect`
+        Creates a large rectangle out of all constituent boxes (rectangles containing connected components)
+        :param iterable boxes: list of bounding boxes to combine into a larger box
+        :return: a large rectangle covering all smaller rectangles
         """
-        is_valid_tuple = all(isinstance(elem, tuple) and len(elem) == 2 for elem in points)
-        is_valid_ndarray = all(isinstance(elem, np.ndarray) and len(elem) == 2 for elem in points)
+        # print('boxes:', boxes)
+        top = min(rect.top for rect in boxes)
+        bottom = max(rect.bottom for rect in boxes)
+        left = min(rect.left for rect in boxes)
+        right = max(rect.right for rect in boxes)
 
-        if is_valid_tuple or is_valid_ndarray:
-            rows = [elem[1] for elem in points]
-            cols = [elem[0] for elem in points]
+        megabox = cls(top=top, bottom=bottom, left=left, right=right)
+        return megabox
 
-        elif all(isinstance(elem, Point) for elem in points):
-            rows = [elem.row for elem in points]
-            cols = [elem.col for elem in points]
-
-        else:
-            raise TypeError('Only `Point` objects or tuples of coordinate pairs are allowed.')
-
-        rows.sort()
-        cols.sort()
-        # Take average of each pair to account for imperfections in polygonal approximation
-        if greedy:
-            top, bottom = rows[0], rows[3]
-            left, right = cols[0], cols[3]
-        else:
-            top, bottom = sum(rows[:2])/2, sum(rows[2:])/2
-            left, right = sum(cols[:2])/2, sum(cols[2:])/2
-
-        return cls(int(left), int(right), int(top), int(bottom))
-
-    # Order in init changes to match that in skimage measure.regionprops.bbox
     def __init__(self, left, right, top, bottom):
         """
 
@@ -250,7 +192,6 @@ class Rect(object):
         return xcenter, ycenter
 
     @property
-    # This now returns an tuple of ints directly
     def geometric_centre(self):
         """(x, y) coordinates of pixel nearest to center point.
 
@@ -258,7 +199,6 @@ class Rect(object):
         """
         xcenter, ycenter = self.center
         return int(np.around(xcenter)), int(np.around(ycenter))
-
 
     def __repr__(self):
         return '%s(left=%s, right=%s, top=%s, bottom=%s)' % (
@@ -276,7 +216,7 @@ class Rect(object):
             return False
 
     def __call__(self):
-        return (self.left, self.right, self.top, self.bottom)
+        return self.left, self.right, self.top, self.bottom
 
     def __iter__(self):
         return iter([self.left, self.right, self.top, self.bottom])
@@ -300,24 +240,25 @@ class Rect(object):
     def overlaps(self, other):
         """Return true if ``other_rect`` overlaps this rect.
 
-        :param Rect other_rect: Another rectangle.
-        :return: Whether ``other_rect`` overlaps this rect.
+        :param Rect other: Another rectangle.
+        :return: Whether ``other`` overlaps this rect.
         :rtype: bool
         """
         if isinstance(other, Rect):
             overlaps = (min(self.right, other.right) > max(self.left, other.left) and
-                    min(self.bottom, other.bottom) > max(self.top, other.top))
+                        min(self.bottom, other.bottom) > max(self.top, other.top))
         elif isinstance(other, Line):
             overlaps = any(p.row in range(self.top, self.bottom) and
-                       p.col in range(self.left, self.right) for p in other.pixels)
+                           p.col in range(self.left, self.right) for p in other.pixels)
+        else:
+            return NotImplemented
         return overlaps
-
 
     def separation(self, other):
         """ Returns the distance between the center of each graph
 
-        :param Rect other_rect: Another rectangle
-        :return: Distance between centoids of rectangle
+        :param Rect other: Another rectangle
+        :return: Distance between centroids of rectangle
         :rtype: float
         """
         if hasattr(other, 'panel'):
@@ -345,23 +286,46 @@ class Rect(object):
         return min(self.bottom, other_rect.bottom) > max(self.top, other_rect.top)
 
     def create_crop(self, figure):
+        """Creates crop from the rectangle in figure
+        :return: crop containing the rectangle
+        :rtype: Crop"""
         return Crop(figure, self)
 
-    def create_padded_crop(self, figure, pad_width=(10,10), pad_val=0):
+    def create_padded_crop(self, figure, pad_width=(10, 10), pad_val=0):
+        """Creates a crop from the rectangle in figure and pads it
+        :return: padded crop containing the rectangle
+        :rtype: Crop"""
         crop = self.create_crop(figure)
         img = pad(crop.img, pad_width=pad_width, constant_values=pad_val)
         dummy_fig = Figure(img, img)
         return Crop(dummy_fig, Rect(0, dummy_fig.width, 0, dummy_fig.height))
 
     def create_extended_crop(self, figure, extension):
+        """Creates a crop from the rectangle and its surroundings in figure
+        :return: crop containing the rectangle and its neighbourhood
+        :rtype: Crop"""
         left, right, top, bottom = self.__call__()
         left, right = left - extension, right + extension
         top, bottom = top - extension, bottom + extension
         return Panel(left, right, top, bottom).create_crop(figure)
 
-class Panel(Rect):
-    """ Tagged section inside Figure"""
 
+class Panel(Rect):
+    """ Tagged section inside Figure
+
+    :param left: left coordinate of a bounding box
+    :type left: int
+    :param right: right coordinate of a bounding box
+    :type right: int
+    :param top: top coordinate of a bounding box
+    :type top: int
+    :param bottom: bottom coordinate of a bounding box
+    :type bottom: int
+    :param fig: main figure
+    :type fig: Figure
+    :param tag: tag of the panel (usually assigned by ndi.label routine)
+    :type tag: int
+    """
     def __init__(self, left, right, top, bottom, fig=None, tag=None):
         super(Panel, self).__init__(left, right, top, bottom)
         self.tag = tag
@@ -373,27 +337,7 @@ class Panel(Rect):
         self.role = None
         self.parent_panel = None
         self._crop = None
-
-    # @property
-    # def role(self):
-    #     return self._role
-    #
-    # @role.setter
-    # def role(self, value):
-    #     if self._role is None:
-    #         self._role = value
-    #     else:
-    #         raise AttributeError('Role of a _panel can only be set once!')
-
-
-
-    @property
-    def repeating(self):
-        return self._repeating
-
-    @repeating.setter
-    def repeating(self, repeating):
-        self._repeating = repeating
+        self._pixel_ratio = None
 
     @property
     def pixel_ratio(self):
@@ -415,13 +359,14 @@ class Panel(Rect):
         merged connected components) to create a single, large panel.
 
         All connected components in ``fig`` that are entirely within the panel are merged to create an undilated
-        superpanel (important for standardisation)
+        super-panel (important for standardisation)
         :param Figure fig: Analysed figure
-        :param Panel dilated_panel: dilated superpanel
-        :return: Panel; undilated superpanel
+        :return: Panel; super-panel made from all connected components that constitute the large panel in raw figure
+        :rtype: Panel
         """
         ccs_to_merge = [cc for cc in fig.connected_components if self.contains(cc)]
-        return create_megabox(ccs_to_merge)
+        return Rect.create_megarect(ccs_to_merge)
+
 
 class Figure(object):
     """A figure image."""
@@ -435,17 +380,9 @@ class Figure(object):
         self.img = img
         self.raw_img = raw_img
         self.kernel_sizes = None
-        self.boundary_length = None
-
-
-        # if isinstance(img, np.ndarray):
+        self.single_bond_length = None
         self.width, self.height = img.shape[1], img.shape[0]
-        # elif isinstance(img, Rect):
-        #     self.width = img.right-img.left
-        #     self.height = img.bottom - img.top
-
         self.center = (int(self.width * 0.5), int(self.height) * 0.5)
-
         self.connected_components = None
         self.get_connected_components()
 
@@ -462,12 +399,6 @@ class Figure(object):
     def diagonal(self):
         return np.hypot(self.width, self.height)
 
-    # @property
-    # def backbones(self):
-    #     if self._backbones is None:
-    #         self.detect_structures()
-    #     return self._backbones
-
     def get_bounding_box(self):
         """ Returns the Panel object for the extreme bounding box of the image
 
@@ -482,7 +413,6 @@ class Figure(object):
     def get_connected_components(self):
         """
         Convenience function that tags ccs in an image and creates their Panels
-        :param Figure fig: Input Figure
         :return set: set of Panels of connected components
         """
 
@@ -495,24 +425,12 @@ class Figure(object):
 
         self.connected_components = panels
 
-    # def plot_backbones(self):
-    #     f = plt.figure()
-    #     ax = f.add_axes([.1, .1, .9, .9])
-    #     ax.imshow(self.img)
-    #
-    #     backbones = [cc for cc in self.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
-    #     for _panel in backbones:
-    #         rect_bbox = Rectangle((_panel.left, _panel.top), _panel.right - _panel.left, _panel.bottom - _panel.top,
-    #                               facecolor='none', edgecolor='m')
-    #         ax.add_patch(rect_bbox)
-    #     plt.show()
-
-
     def role_plot(self):
-        colors = ['r', 'g', 'y', 'm', 'b', 'c', 'k']
+        """Adds rectangles around each connected component according to its role in a figure"""
+        colors = 2*['r', 'g', 'y', 'm', 'b', 'c', 'k']
 
         f = plt.figure()
-        ax = f.add_axes([.1, .1, .9, .9])
+        ax = f.add_axes([0, 0, 1, 1])
         ax.imshow(self.img)
 
         for panel in self.connected_components:
@@ -525,37 +443,38 @@ class Figure(object):
             ax.add_patch(rect_bbox)
         plt.show()
 
+
 class Crop:
+    """Class used to represent crops of figures with links to the main figure and crop paratemeters, as well as
+    connected components both in the main coordinate system and in-crop coordinate system
+
+    :param main_figure: the parent figure
+    :type main_figure: Figure
+    :param crop_params: parameters of the crop (either left, right, top, bottom tuple or Rect() with these attributes)
+    :type crop_params: tuple|Rect
+    """
     def __init__(self, main_figure, crop_params):
         self.main_figure = main_figure
         self.crop_params = crop_params  # (left, right, top, bottom) of the intended crop or Rect() with these attribs
-
-        self.cropped_rect = None  # Actual reactangle that was used for the crop - accounting for the boundaries in ``main_figure``
-        self._img = None  # np.ndarray
+        self.cropped_rect = None  # Actual rectangle used for the crop - different if crop_params are out of fig bounds
+        self.img = None
         self.raw_img = None
         self.crop_main_figure()
+        self.connected_components = None
         self.get_connected_components()
 
     def __eq__(self, other):
-        return self.main_figure == other.main_figure and self.crop_params == other.crop_params\
-               and self.cropped_img == other.cropped_img
-
-    # @property
-    # def img(self):
-    #     return self._img
-    #
-    # @img.setter
-    # def img(self, value):
-    #     self._img = value
-    #     if hasattr(self, 'padding'):
-    #         self.get_connected_components()
+        return self.main_figure == other.main_figure and self.crop_params == other.crop_params \
+               and self.img == other.img
 
     def in_main_fig(self, element):
         """
         Transforms coordinates of ``cc`` (from ``self.connected_components``) to give coordinates of the
         corresponding cc in ``self.main_figure''. Returns a new  object
+
         :param Panel|Point element: connected component or point to transform to main coordinate system
         :return: corresponding Panel|Rect object
+        :rtype: type(element)
         `"""
         if hasattr(element, 'row') and hasattr(element, 'col'):
             new_row = element.row + self.cropped_rect.top
@@ -573,9 +492,10 @@ class Crop:
         """
         Transforms coordinates of ''cc'' (from ``self.main_figure.connected_components``) to give coordinates of the
         corresponding cc within a crop. Returns a new  object
-        :param Panel cc: connected component to transform
 
+        :param Panel cc: connected component to transform
         :return: Panel object with new in-crop attributes
+        :rtype: type(cc)
         """
         new_top = cc.top - self.cropped_rect.top
         new_bottom = new_top + cc.height
@@ -594,7 +514,9 @@ class Crop:
         """
         c_left, c_right, c_top, c_bottom = self.cropped_rect   # c is for 'crop'
 
-        transformed_ccs = [cc for cc in self.main_figure.connected_components if cc.right <= c_right and cc.left >= c_left]
+        transformed_ccs = [cc for cc in self.main_figure.connected_components
+                           if cc.right <= c_right and cc.left >= c_left]
+
         transformed_ccs = [cc for cc in transformed_ccs if cc.bottom <= c_bottom and cc.top >= c_top]
 
         transformed_ccs = [self.in_crop(cc) for cc in transformed_ccs]
@@ -607,11 +529,6 @@ class Crop:
 
         Automatically limits the crop if bounds are outside the image.
 
-        :param numpy.ndarray img: Input image.
-        :param int left: Left crop.
-        :param int right: Right crop.
-        :param int top: Top crop.
-        :param int bottom: Bottom crop.
         :return: Cropped image.
         :rtype: numpy.ndarray
         """
@@ -636,33 +553,42 @@ class Crop:
         self.img = out_img
         self.raw_img = out_raw_img
 
+
 @coords_deco
 class TextLine:
+    """
+    TextLine objects represent lines of text in an image and contain all its connected components and a super-panel
+    associated with them.
 
+    :param left: left coordinate of a bounding box
+    :type left: int
+    :param right: right coordinate of a bounding box
+    :type right: int
+    :param top: top coordinate of a bounding box
+    :type top: int
+    :param bottom: bottom coordinate of a bounding box
+    :type bottom: int
+    :param fig: main figure
+    :type fig: Figure
+    :param crop: crop of a region in figure containing the text line
+    :type crop: Crop
+    :param anchor: a point in the main figure system that belongs to a text line and situates it within the main
+    coordinate system
+    :type anchor: Point
+    :param connected_components: all connected components bleonging to the text line
+    :type connected_components: list
     """
-    TextLine objects represent lines of text in an image and contain all its connected components. They inherit from
-    `Panel` and have `left`, `right`, `top` and `bottom` attributes which are the extrema of attributes of individual
-    character connected components. These parameters are updated each time characters are added or removed from the
-    text_line. The ``crop`` attribute defines the coordinate system to which panels in ``_connected_components`` belong.
-    It is set to None by default, which indicates text line coordinates in the main figure are given.
-    """
-    def __init__(self, left, right, top, bottom, fig=None, crop=None, anchor=None, connected_components=[]):
+    def __init__(self, left, right, top, bottom, fig=None, crop=None, anchor=None, connected_components=None):
+        if connected_components is None:
+            connected_components = []
         self.text = None
         self.crop = crop
         self._anchor = anchor
         self.panel = Panel(left, right, top, bottom, fig)
-
-
-
-
         self._connected_components = connected_components
         # self.find_text() # will be used to find text from `connected_components`
 
     def __repr__(self):
-        # left = self.panel.left
-        # right = self.panel.right
-        # top = self.panel.top
-        # bottom = self.panel.bottom
         return f'TextLine(left={self.left}, right={self.right}, top={self.top}, bottom={self.bottom})'
 
     def __iter__(self):
@@ -672,10 +598,6 @@ class TextLine:
         return item in self.connected_components
 
     def __hash__(self):
-        # left = self.panel.left
-        # right = self.panel.right
-        # top = self.panel.top
-        # bottom = self.panel.bottom
         return hash(self.left + self.right + self.top + self.bottom)
 
     @property
@@ -685,7 +607,8 @@ class TextLine:
     @property
     def in_main_figure(self):
         """
-        Transforms the text line into the main (figure) coordinate system
+        Transforms the text line into the main (figure) coordinate system.
+        :return: self
         """
         if self.crop:
             new_top = self.panel.top + self.crop.cropped_rect.top
@@ -724,44 +647,15 @@ class TextLine:
         else:
             raise ValueError('An anchor cannot be set twice')
 
-    # @property
-    # def width(self):
-    #     if self._width:
-    #         return self._width
-    #
-    #     if self.connected_components:
-    #         return np.max([cc.right for cc in self.connected_components])\
-    #                - np.min([cc.left for cc in self.connected_components])
-
     def adjust_boundaries(self):
+        """Adjusts boundaries of text line based on the extrema of connected components"""
         left = np.min([cc.left for cc in self._connected_components])
         right = np.max([cc.right for cc in self._connected_components])
         top = np.min([cc.top for cc in self._connected_components])
         bottom = np.max([cc.bottom for cc in self._connected_components])
         self.panel = Panel(left, right, top, bottom)
 
-
-
     def append(self, element):
+        """Appends new connected component and adjusts boundaries of the text line"""
         self.connected_components.append(element)
         self.adjust_boundaries()
-
-    # def find_anchor(self, ccs):
-    #     """
-    #     find a single cc that belongs to the TextLine. Anchors a TextLine without 'left' and 'right' attributes in an
-    #     image. The anchor can be used to find all connected components that belong to the TextLine. The anchor should
-    #     be set in the main figure coordinate system, as its position cannot be changed later.
-    #     :param [Panel,...] ccs: collection of panels to choose from
-    #     :return: None
-    #     """
-    #     mean_area = np.mean([cc.area for cc in ccs])
-    #     for cc in ccs:
-    #         if cc.area > 0.4 * mean_area:  # Exclude dots, commas etc
-    #             if cc.bottom == self._panel.bottom:
-    #                 self.anchor = Point(cc.center[1], cc.center[0])
-    #                 break
-    #             elif cc.top == self._panel.top:
-    #                 self.anchor = Point(cc.center[1], cc.center[0])
-    #                 break
-    #     if not self.anchor:
-    #         raise AnchorNotFoundException('A text line could not be anchored')

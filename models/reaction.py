@@ -1,22 +1,48 @@
+# -*- coding: utf-8 -*-
+"""
+Reaction
+=======
+
+This module contains classes for representing reaction elements.
+
+author: Damian Wilary
+email: dmw51@cam.ac.uk
+
+"""
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
+
 import logging
+import numpy as np
+from itertools import product
 
+from models.exceptions import NotAnArrowException
 from models.segments import Panel, PanelMethodsMixin
+from models.utils import Point, PrettyFrozenSet
 
-log = logging.getLogger(__name__)
+log = logging.getLogger('extract.reaction')
 
 
 class BaseReactionClass(object):
     """
-    This is a base reaction class placeholder
+    This is a base.py reaction class placeholder
     """
 
 
 class Diagram(BaseReactionClass, PanelMethodsMixin):
-    """This is a base class for chemical structures species found in diagrams (e.g. reactants and products)"""
+    """This is a base.py class for chemical structures species found in diagrams (e.g. reactants and products)
+
+    :param panel: bounding box a diagrams
+    :type panel: Panel
+    :param label: label associated with a diagram
+    :type label: Label
+    :param smiles: SMILES associated with a diagram
+    :type smiles: str
+    :param crop: crop containing the diagram
+    :type crop: Crop"""
 
     @classmethod
     def from_coords(cls, left, right, top, bottom, label=None, smiles=None, crop=None):
@@ -24,13 +50,25 @@ class Diagram(BaseReactionClass, PanelMethodsMixin):
         panel = Panel(left, right, top, bottom)
         return cls(panel=panel, label=label, smiles=smiles, crop=crop)
 
-
     def __init__(self, panel, label=None, smiles=None, crop=None):
         self._panel = panel
         self._label = label
         self._smiles = smiles
         self._crop = crop
         super().__init__()
+
+    def __eq__(self, other):
+        if isinstance(other, Diagram):  # Only compare exact same types
+            return self.panel == other.panel and self.label == other.label
+
+    def __hash__(self):
+        return hash(self.panel)
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}(panel={self.panel}, smiles={self.smiles}, label={self.label})'
+
+    def __str__(self):
+        return f'{self.smiles if self.smiles else "???"}, label: {self.label}'
 
     @property
     def panel(self):
@@ -85,28 +123,24 @@ class Diagram(BaseReactionClass, PanelMethodsMixin):
         else:
             return None
 
-    def __eq__(self, other):
-        if isinstance(other, Diagram):   # Only compare exact same types
-            return self.panel == other.panel and self.label == other.label
 
-    def __hash__(self):
-        return hash(self.panel)
-
-    def __repr__(self):
-        return f'{self.__class__.__name__}(panel={self.panel}, smiles={self.smiles}, label={self.label})'
-
-    def __str__(self):
-        return f'{self.smiles}, label: {self.label}'
 
 
 class ReactionStep(BaseReactionClass):
     """
     This class describes elementary steps in a reaction.
+
+    :param reactants: reactants of a reaction
+    :type reactants: frozenset[Diagram]
+    :param products: products of a reaction
+    :type products: frozenset[Diagram]
+    :param conditions: reaction conditions for the step
+    :type conditions: Conditions
     """
 
     def __init__(self, reactants, products, conditions):
-        self.reactants = frozenset(reactants)
-        self.products = frozenset(products)
+        self.reactants = PrettyFrozenSet(reactants)
+        self.products = PrettyFrozenSet(products)
         self.conditions = conditions
 
     def __eq__(self, other):
@@ -114,10 +148,12 @@ class ReactionStep(BaseReactionClass):
                 self.conditions == other.conditions)
 
     def __repr__(self):
-        return f'ReactionStep({self.reactants},{self.products},{self.conditions})'
+        return f'ReactionStep(reactants=({self.reactants}),products=({self.products}),{self.conditions})'
 
     def __str__(self):
-        return '+'.join(self.reactants)+'-->'+'+'.join(self.products)
+        reactant_strings = [elem.smiles if elem.smiles else '???' for elem in self.reactants]
+        product_strings = [elem.smiles if elem.smiles else '???' for elem in self.products]
+        return ' + '.join(reactant_strings)+'  -->  ' + ' + '.join(product_strings)
 
     def __hash__(self):
         all_species = [species for group in iter(self) for species in group]
@@ -127,51 +163,19 @@ class ReactionStep(BaseReactionClass):
     def __iter__(self):
         return iter ((self.reactants, self.products))
 
-    def match_function_and_smiles(self, csr_output):
-        """
-        Matches the resolved smiles from chemschematicresolver with roles (reactant, product) found by the segmentation
-        algorithm.
-
-        :param [[smile], [ccs]] csr_output: list of lists containing structures converted into SMILES format and recognised
-         labels, and connected components depicting the structures in an image
-        :return: bool True if matching successful else False
-        """
-        smile_panel_pairs = list(zip(*csr_output))
-        for reactant in self.reactants:
-            matching_record = [recognised for recognised, diag in smile_panel_pairs
-                               if Panel(diag.left, diag.right, diag.top, diag.bottom) == reactant.panel]
-            # This __eq__ is based on a flaw in csr - cc is of type `Label`, but inherits from Rect
-            if matching_record:
-                matching_record = matching_record[0]
-                reactant.label = matching_record[0]
-                reactant.smiles = matching_record[1]
-            else:
-                log.warning('No SMILES match was found for a reactant structure')
-
-        for product in self.products:
-
-            matching_record = [recognised for recognised, diag in smile_panel_pairs
-                               if diag == product.panel]
-            # This __eq__ is based on flaw in csr - cc is of type `Diagram`, but inherits from Rect
-            if matching_record:
-                matching_record = matching_record[0]
-                product.label = matching_record[0]
-                product.smiles = matching_record[1]
-            else:
-                log.warning('No SMILES match was found for a product structure')
-
-        if all([reactant.smiles for reactant in self.reactants]) and \
-            all ([product.smiles for product in self.products]):
-            print('all structures were translated to SMILES')
-            return True
-        else:
-            print('No SMILES were found for some structures - extraction unsuccessful')
-            return False
-
 
 class Conditions:
     """
     This class describes conditions region and associated text
+
+    :param text_lines: extracted text lines containing conditions
+    :type text_lines: list[TextLine]
+    :param conditions_dct: dictionary with all parsed conditions
+    :type conditions_dct: dict
+    :param arrow: reaction arrow, around which the search for conditions is performed
+    :type arrow: SolidArrow
+    :param structure_panels: bounding boxes of all chemical structures found in the region
+    :type structure_panels: list[Panel]
     """
 
     def __init__(self, text_lines, conditions_dct, arrow, structure_panels=None):
@@ -189,7 +193,9 @@ class Conditions:
         return f'Conditions({self.text_lines}, {self.conditions_dct}, {self.arrow})'
 
     def __str__(self):
-        return "\n".join(f'{key} : {value}' for key, value in self.conditions_dct.items() if value)
+        delimiter = '\n------\n'
+        return delimiter + 'Step conditions:' + \
+               '\n'.join(f'{key} : {value}' for key, value in self.conditions_dct.items() if value)  + delimiter
 
     def __eq__(self, other):
         if other.__class__ == self.__class__:
@@ -197,20 +203,22 @@ class Conditions:
 
         else:
             return False
-    #
-    # def __getitem__(self, item):
-    #     return self.conditions_dct[item]
 
     def __hash__(self):
         return hash(sum(hash(line) for line in self.text_lines))
 
     @property
+    def structure_panels(self):
+        return self._structure_panels
+
+    @property
     def anchor(self):
         a_pixels = self.arrow.pixels
         return a_pixels[len(a_pixels)//2]
+
     @property
-    def co_reactants(self):
-        return self.conditions_dct['co-reactants']
+    def coreactants(self):
+        return self.conditions_dct['coreactants']
 
     @property
     def catalysts(self):
@@ -238,15 +246,25 @@ class Conditions:
 
 
 class Label(PanelMethodsMixin):
-    # Should this be just a named tuple?
-    """Describes labels and recgonised text"""
+    """Describes labels and recgonised text
+
+    :param panel: bounding box a label
+    :type panel: Panel
+    :param text: label text
+    :type text: str
+    :param r_group: generic r_groups associated with a label
+    :type r_group: str"""
 
     @classmethod
     def from_coords(cls, left, right, top, bottom, text):
         panel = Panel(left, right, top, bottom)
         return cls(panel, text)
 
-    def __init__(self, panel, text=[], r_group=[]):
+    def __init__(self, panel, text=None, r_group=None):
+        if r_group is None:
+            r_group = []
+        if text is None:
+            text = []
         self.panel = panel
         self._text = text
         self.r_group = r_group
@@ -262,6 +280,9 @@ class Label(PanelMethodsMixin):
     def __repr__(self):
         return f'Label(panel={self.panel}, text={self.text}, r_group={self.r_group})'
 
+    def __str__(self):
+        return f'Label(Text: {", ".join(sent.text.strip() for sent in self.text)})'
+
     def __hash__(self):
         return hash(self.panel)
 
@@ -273,3 +294,169 @@ class Label(PanelMethodsMixin):
         """ Updates the R-groups for this label."""
 
         self.r_group.append(var_value_label_tuples)
+
+
+class BaseArrow(PanelMethodsMixin):
+    """Base arrow class common to all arrows
+
+    :param pixels: pixels forming the arrows
+    :type pixels: list[Point]
+    :param line: line found by Hough transform, underlying primitive,
+    :type line: Line
+    :param panel: bounding box of an arrow
+    :type panel: Panel"""
+
+    def __init__(self, pixels, line, panel):
+        if not all(isinstance(pixel, Point) for pixel in pixels):
+            self.pixels = [Point(row=coords[0], col=coords[1]) for coords in pixels]
+        else:
+            self.pixels = pixels
+
+        self.line = line
+        self._panel = panel
+        slope = self.line.slope
+        self.sort_pixels()
+        self._center_px = None
+
+    @property
+    def panel(self):
+        return self._panel
+
+    @property
+    def is_vertical(self):
+        return self.line.is_vertical
+
+    @property
+    def center_px(self):
+        """
+        Based on a geometric centre of an arrow panel, looks for a pixel nearby that belongs to the arrow.
+
+        :return: coordinates of the pixel that is closest to geometric centre and belongs to the object.
+        If multiple pairs found, return the floor average.
+        :rtype: Point
+        """
+        if self._center_px is not None:
+            return self._center_px
+
+        log.debug('Finding center of an arrow...')
+        x, y = self.panel.geometric_centre
+
+        log.debug('Found an arrow with geometric center at (%s, %s)' % (y, x))
+
+        # Look at pixels neighbouring center to check which actually belong to the arrow
+        x_candidates = [x+i for i in range(-3, 4)]
+        y_candidates = [y+i for i in range(-3, 4)]
+        center_candidates = [candidate for candidate in product(x_candidates, y_candidates) if
+                             Point(row=candidate[1], col=candidate[0]) in self.pixels]
+
+        log.debug('Possible center pixels: %s', center_candidates)
+        if center_candidates:
+            self._center_px = np.mean(center_candidates, axis=0, dtype=int)
+            self._center_px = Point(row=self._center_px[1], col=self._center_px[0])
+        else:
+            raise NotAnArrowException('No component pixel lies on the geometric centre')
+        log.debug('Center pixel found: %s' % self._center_px)
+
+        return self._center_px
+
+    def sort_pixels(self):
+        """
+        Simple pixel sort.
+
+        Sorts pixels by row in vertical arrows and by column in all other arrows
+        :return:
+        """
+        if self.is_vertical:
+            self.pixels.sort(key=lambda pixel: pixel.row)
+        else:
+            self.pixels.sort(key=lambda pixel: pixel.col)
+
+
+class SolidArrow(BaseArrow):
+    """
+    Class used to represent simple reaction arrows.
+
+    :param pixels: pixels forming the arrows
+    :type pixels: list[Point]
+    :param line: line found by Hough transform, underlying primitive,
+    :type line: Line
+    :param panel: bounding box of an arrow
+    :type panel: Panel"""
+
+    def __init__(self, pixels, line, panel):
+        super(SolidArrow, self).__init__(pixels, line, panel)
+        self.react_side = None
+        self.prod_side = None
+        a_ratio = self.panel.aspect_ratio
+        a_ratio = 1/a_ratio if a_ratio < 1 else a_ratio
+        if a_ratio < 3:
+            raise NotAnArrowException('aspect ratio is not within the accepted range')
+
+        self.react_side, self.prod_side = self.get_direction()
+        pixel_majority = len(self.prod_side) - len(self.react_side)
+        num_pixels = len(self.pixels)
+        min_pixels = min(int(0.1 * num_pixels), 15)
+        if pixel_majority < min_pixels:
+            raise NotAnArrowException('insufficient pixel majority')
+        elif pixel_majority < 2 * min_pixels:
+            log.warning('Difficulty detecting arrow sides - low pixel majority')
+
+        log.debug('Arrow accepted!')
+
+    def __repr__(self):
+        return f'SolidArrow(pixels={self.pixels}, line={self.line}, panel={self.panel})'
+
+    def __str__(self):
+        left, right, top, bottom = self.panel
+        return f'SolidArrow({left, right, top, bottom})'
+
+    def __eq__(self, other):
+        return self.panel == other.panel
+
+    def __hash__(self):
+        return hash(pixel for pixel in self.pixels)
+
+    @property
+    def hook(self):
+        """
+        Returns the last pixel of an arrow hook.
+        :return:
+        """
+        if self.is_vertical:
+            prod_side_lhs = True if self.prod_side[0].row < self.react_side[0].row else False
+        else:
+            prod_side_lhs = True if self.prod_side[0].col < self.react_side[0].col else False
+        return self.prod_side[0] if prod_side_lhs else self.prod_side[-1]
+
+    def get_direction(self):
+        """Retrieves the direction of an arrow by looking at the number of pixels on each side.
+
+        Splits an arrow in the middle depending on its slope and calculated the number of pixels in each part."""
+        center = self.center
+        center = Point(center[1], center[0])
+        if self.is_vertical:
+            part_1 = [pixel for pixel in self.pixels if pixel.row < center.row]
+            part_2 = [pixel for pixel in self.pixels if pixel.row > center.row]
+
+        elif self.line.slope == 0:
+            part_1 = [pixel for pixel in self.pixels if pixel.col < center.col]
+            part_2 = [pixel for pixel in self.pixels if pixel.col > center.col]
+
+        else:
+            p_slope = -1/self.line.slope
+            p_intercept = center.row - center.col*p_slope
+            p_line = lambda point: point.col*p_slope + p_intercept
+            part_1 = [pixel for pixel in self.pixels if pixel.row < p_line(pixel)]
+            part_2 = [pixel for pixel in self.pixels if pixel.row > p_line(pixel)]
+
+        if len(part_1) > len(part_2):
+            react_side = part_2
+            prod_side = part_1
+        else:
+            react_side = part_1
+            prod_side = part_2
+
+        log.debug('Established reactant and product sides of an arrow.')
+        log.debug('Number of pixel on reactants side: %s ', len(react_side))
+        log.debug('product side: %s ', len(prod_side))
+        return react_side, prod_side

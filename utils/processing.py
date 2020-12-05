@@ -1,25 +1,32 @@
-import copy
+# -*- coding: utf-8 -*-
+"""
+Processing
+==========
+
+This module contains low level processing routines
+
+author: Damian Wilary
+email: dmw51@cam.ac.uk
+
+"""
+from __future__ import absolute_import
+from __future__ import division
+
 from collections.abc import Container
+import copy
 import math
 import numpy as np
-import matplotlib.pyplot as plt
-
 
 from scipy import ndimage as ndi
-from scipy.ndimage import label
-from scipy.ndimage import binary_closing, binary_dilation
+from scipy.ndimage import label, binary_closing, binary_dilation
 from skimage.color import rgb2gray
 from skimage.measure import regionprops
-from skimage.morphology import disk, rectangle
+from skimage.morphology import disk, skeletonize as skeletonize_skimage
 from skimage.transform import probabilistic_hough_line
-from skimage.util import pad
-from skimage.util import crop as crop_skimage
-
-import cv2
-import imutils
+from skimage.util import pad, crop as crop_skimage
 
 from models.utils import Line, Point
-from models.segments import Rect, Panel, Figure, TextLine
+from models.segments import Rect, Panel, Figure, FigureRoleEnum
 
 
 def convert_greyscale(img):
@@ -94,10 +101,6 @@ def pixel_ratio(fig, diag):
 
     :return ratio: Float detailing ('on' pixels / bounding box area)
     """
-    # if isinstance(fig.img, np.ndarray):
-    #     cropped_img = crop(fig.img, left=diag.left, right=diag.right, top=diag.top, bottom=diag.bottom)
-    # elif isinstance(fig.img, Panel):
-    #     cropped_img = crop_rect(fig)
     cropped_img = crop_rect(fig.img, diag)
     cropped_img = cropped_img['img']
     ones = np.count_nonzero(cropped_img)
@@ -154,7 +157,6 @@ def erase_elements(fig, elements):
     try:
         flattened = temp_fig.img.flatten()
         for element in elements:
-            # print(arrow.pixels)
             np.put(flattened, [pixel.row * temp_fig.img.shape[1] + pixel.col for pixel in element.pixels], 0)
         img_no_elements = flattened.reshape(temp_fig.img.shape[0], temp_fig.img.shape[1])
         temp_fig.img = img_no_elements
@@ -301,9 +303,6 @@ def bresenham_line_y_dominant(point_1, point_2, slope):
     return Line(pixels=pixels)
 
 
-
-
-
 def remove_small_fully_contained(connected_components):
     """
     Remove smaller connected components if their bounding boxes are fully enclosed within larger connected components
@@ -332,51 +331,6 @@ def merge_rect(rect1, rect2):
     return Rect(left=left, right=right, top=top, bottom=bottom)
 
 
-# def merge_overlapping(connected_components):
-#     """
-#     Iteratively merges overlapping rectangles until no more merging is possible.
-#     :param iterable connected_components: iterable of connected components in an image
-#     :return set : a set of merged connected components
-#     """
-#     print('fresh function started!')
-#     cc_container = list(connected_components)
-#     print(len(connected_components))
-#     i=0
-#     while True:
-#         i +=1
-#         merged_list = []
-#         for cc1 in cc_container:
-#             merged = False  # If a rectangle is not merged, use this flag to add to merged_list on it own
-#             for cc2 in cc_container:
-#                 if cc1 != cc2 and cc1.overlaps(cc2):
-#                     merged_list.append(merge_rect(cc1, cc2))
-#                     print('cc1:  ',cc1)
-#                     print('cc2: ', cc2)
-#                     print('merging!')
-#                     merged = True  # if merging occured, append the merged rectangle instead
-#             #print('merged after all cc2:', merged_list)
-#             if not merged:
-#                 print('appending unmerged rect!')
-#                 merged_list.append(cc1)
-#         #print('compare merged:', merged_list)
-#         #print('cc:            ', cc_container)
-#
-#         if merged_list == cc_container:  # This happens only if not merged for all cc1
-#             print('same, breaking!')
-#             break
-#
-#         if i ==10:
-#             print('limit reached, breaking')
-#             break
-#
-#         else:
-#             print('running again!')
-#             print('---')
-#             cc_container = merged_list  # Replace the original container with partially merged rectangles
-#
-#     return set(merged_list)
-
-
 def remove_connected_component(cc, connected_components):
     """
     Attempt to remove connected component and return the smaller set
@@ -393,7 +347,7 @@ def remove_connected_component(cc, connected_components):
 def isolate_patches(fig, to_isolate):
     """
     Creates an empty np.ndarray of shape `fig.img.shape` and populates it with pixels from `to_isolate`
-    :param Figure fig: Figure object with binarized image
+    :param Figure|Crop fig: Figure object with binarized image
     :param iterable of Panels to_isolate: a set or a list of connected components to isolate
     :return: np.ndarray of shape `fig.img.shape` populated with only the isolated components
     """
@@ -462,124 +416,10 @@ def intersect_rectangles(rect1, rect2):
     bottom = min(rect1.bottom, rect2.bottom)
     return Rect(left, right, top, bottom)
 
-# def belongs_to_textline(cropped_img, _panel, textline,threshold=0.7):
-#     """
-#     Return True if a _panel belongs to a text_line, False otherwise.
-#     :param np.ndarray cropped_img: image cropped around text elements
-#     :param Panel _panel: Panel containing connected component to check
-#     :param TextLine textline: Textline against which the _panel is compared
-#     :param float threshold: threshold for assigning a cc to a text_line, ratio of on-pixels in a cc
-#                             contained within the line
-#     :return: bool True if _panel lies on the text_line
-#     """
-#
-#     #print('running belongs to text_line!')
-#     if textline.contains(_panel): #if text_line covers the _panel completely
-#         return True
-#
-#     # If it doesn't, check if the main body of connected component is within the text_line
-#     element = cropped_img[_panel.top:_panel.bottom, _panel.left:_panel.right]
-#     text_pixels = np.count_nonzero(element)
-#
-#     shared_space = intersect_rectangles(_panel, textline)
-#     cropped_element = cropped_img[shared_space.top:shared_space.bottom,
-#                       shared_space.left:shared_space.right]
-#
-#     shared_text_pixels = np.count_nonzero(cropped_element)
-#     if shared_text_pixels/text_pixels > threshold:
-#         return True
-#
-#     return False
-
-
-def is_boundary_cc(img, cc):
-    if cc.left == 0:
-        return True
-
-    if cc.right == img.shape[1]:
-        return True
-
-    return False
-
 
 def clean_output(text):
     """ Remove whitespace and newline characters from input text."""
-
-
     return text.replace('\n', '')
-
-# def is_small_textline_character(cropped_img, cc, mean_character_area, textline):
-#     """
-#     Used to detect small characters - eg subscripts, which have less stringent threshold criteria
-#     :param np.ndarray cropped_img: image cropped around condition text elements
-#     :param Panel cc: any connected component
-#     :param float mean_character_area: mean connected component area in `cropped_img`
-#     :param Panel textline: Panel containing a text line
-#     :return: bool True if a small character, False otherwise
-#     """
-#     crop_area = cropped_img.shape[0] * cropped_img.shape[1]
-#     #print(f'area: {crop_area}')
-#     if cc.area < 0.9 * mean_character_area:
-#         #print(f'satisfied area criterion!')
-#         if belongs_to_textline(cropped_img, cc, textline, threshold=0.5):
-#             #print('satisifies thresholding?')
-#             return True
-#
-#     return False
-
-
-def transform_panel_coordinates_to_expanded_rect(crop_rect, expanded_rect, ccs, absolute=False):
-    """
-    Change coordinates of panels in a crop back to the parent frame of reference.
-    :param Rect crop_rect: original system where the _panel was detected
-    :param Rect expanded_rect: a larger part of an image, where a crop was formed
-    :param iterable of Panels ccs: iterable of Panel objects to be transformed into the new coordinate system
-    :param bool absolute: True if the `expanded_crop` coordinates are expressed in global coordinates,
-    False if expressed in the `crop_rect` coordinates, e.g. by extending `crop_rect`. False by default
-    :return: list of new, mapped panels
-    """
-
-    new_panels = []
-    if not absolute:
-        expanded_rect = Rect(0, 0, 0, 0)  # This is just to simplify the function
-    for cc in ccs:
-        cc = copy.deepcopy(cc)  # to avoid side effects
-        height = cc.bottom - cc.top
-        width = cc.right - cc.left
-
-        new_top = cc.top + (crop_rect.top - expanded_rect.top)
-        new_bottom = new_top + height
-        cc.top = new_top
-        cc.bottom = new_bottom
-
-        new_left = cc.left + (crop_rect.left - expanded_rect.left)
-        new_right = new_left + width
-        cc.left = new_left
-        cc.right = new_right
-        new_panels.append(cc)
-    return new_panels
-
-
-def transform_panel_coordinates_to_shrunken_region(cropped_region, ccs):
-
-    if not isinstance(ccs, Container):  # This is just for convenience
-        ccs = [ccs]
-
-    new_panels = []
-    for cc in ccs:
-        height = cc.bottom - cc.top
-        width = cc.right - cc.left
-
-        new_left = cc.left - cropped_region.left
-        new_right = new_left + width
-
-        new_top = cc.top - cropped_region.top
-        new_bottom = new_top + height
-
-        new_panels.append(Panel(left=new_left, right=new_right,
-                                top=new_top, bottom=new_bottom))
-
-    return new_panels
 
 
 def flatten_list(data):
@@ -588,7 +428,6 @@ def flatten_list(data):
     :param [[..]] data: multi-level iterable data structure to flatten
     :return: flattened list of all elements
     """
-
     if len(data) == 0:
         return data
 
@@ -596,102 +435,6 @@ def flatten_list(data):
         return flatten_list(data[0]) + flatten_list(data[1:])
 
     return data[:1] + flatten_list(data[1:])
-
-
-def detect_rectangle_boxes(fig, greedy=False):
-    """
-    Detects rectangular and approximately rectangular (round edged) boxes, which can be further processed (included or
-    excluded). The boxes often contain auxiliary information which is not crucial for understanding.
-    :param Figure fig: Analysed figure
-    :param bool greedy: mode of `Rect` formation. if True, formed by taking extrema of polygonal approximation, averages
-    if False.
-    :return: list of detected rectangles
-    """
-    # convert to work with cv2
-    img = (fig.img * 255).astype('uint8')
-
-    resized = imutils.resize(img, width=2000)
-    ratio = img.shape[0] / float(resized.shape[0])
-    # convert the resized image to grayscale, blur it slightly,
-    # and threshold it
-    blurred = cv2.GaussianBlur(resized, (15, 15), 0)
-    cnts = cv2.findContours(blurred.copy(), cv2.RETR_EXTERNAL,
-                            cv2.CHAIN_APPROX_SIMPLE)
-    cnts = imutils.grab_contours(cnts)
-
-    rects = []
-
-    for c in cnts:
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.03 * peri, True)
-        if len(approx) == 4:
-            approx = approx.astype('float') * ratio
-            approx = approx.astype('int').reshape(4, -1)
-            rects.append(Rect.from_points(approx, greedy=greedy))
-
-    return rects
-
-
-# def detect_headers(fig):
-#     # Detects too much - also labels - need a reliable way to distinguish between the
-#     two (could use try block as safety net)
-#     """
-#     Attempts to detect header text in reaction schemes. This text usually contains additional, superfluous information
-#     :param Figure fig: Analysed figure
-#     :return: iterable of connected components corresponding to header text (if any)
-#     """
-#
-#     # Look at the LHS of image for any text (assume multiple headers for multiple reactions)
-#     fig = copy.copy(fig)
-#     right = int(fig.img.shape[1] * 0.05) if fig.img.shape[1] < 2000 else 100
-#     # header_start_crop = crop(fig.img, left=0, right=right, top=0, bottom=fig.img.shape[0])['img']
-#     ccs = label_and_get_ccs(fig)
-#
-#     header_start_cand = [cc for cc in ccs if cc.right < right]
-#
-#     plt.imshow(fig.img)
-#     plt.show()
-#     # print(f'headers: {headers}')
-#     #(structures)
-#
-#     if not header_start_cand:
-#         return
-#
-#     # For now, assume no labels were captured
-#     detected_headers = []
-#     print(f'candidate headers: {header_start_cand}')
-#     for header in header_start_cand:
-#         tol = int(header.height * 0.4)
-#         # Crop a horizontal line containing the header start
-#
-#         header_line_cands = [cc for cc in ccs if cc.top > header.top-tol and cc.bottom < header.bottom+tol]
-#         print(f'header candidates: {header_line_cands}')
-#         isolated_line = isolate_patches(fig, header_line_cands)
-#
-#         closed_line = Figure(binary_dilation(isolated_line.img, structure=rectangle(1, 30)))
-# close horizontally only
-#         #that looked ugly, make a wrapper func to handle appropriate types?
-#         plt.imshow(closed_line.img)
-#         plt.title('dilated')
-#         plt.show()
-#         line_cc = label_and_get_ccs(closed_line)
-#         line_cc = [cc for cc in line_cc if cc.overlaps(header)][0] # only take the one large cc that contains the
-#         # original header cc
-#         print(f'line cc: {line_cc}')
-#         # the problem is with following line - I need to remove things I'm sure aren't headers (eg structures)
-#         header_ccs = [cc for cc in ccs if line_cc.overlaps(cc) and cc.area < 3 * header.area]
-# to get rid of structures
-#
-#         if header_ccs not in detected_headers:
-#             detected_headers.append(header_ccs)
-#
-#
-#     return detected_headers
-
-    # Expand in horizontal direction around each found header start
-    # Close to find the whole header
-    # Check which ccs this corresponds to in the original image
-    # remove ccs in the text line
 
 
 def normalize_image(img):
@@ -741,15 +484,6 @@ def find_minima_between_peaks(data, peaks):
         minima.append(min_idx)
 
     return minima
-    # return minima
-    # minima = argrelmin(data, axis=1)
-    # min_vals = data[1, minima[1]]
-    #
-    # indices = np.argsort(min_vals)[:n_minima]
-    # minima = minima[1][indices]
-    # minima = np.sort(data[0, minima].astype(int))
-    #
-    # return minima
 
 
 def is_a_single_line(fig, panel, line_length):
@@ -762,13 +496,34 @@ def is_a_single_line(fig, panel, line_length):
     lines = probabilistic_hough_line(isolate_patches(fig, [panel]).img, line_length=line_length)
     if not lines:
         return False
-    # plt.imshow(temp_arr)
 
-    # for line in lines:
-    #     x, y = list(zip(*line))
-    #     plt.plot(x,y)
-    #
-    # plt.show()
     return is_slope_consistent(lines)
 
 
+def skeletonize(fig):
+    """
+    A convenience function operating on Figure objects working similarly to skimage.morphology.skeletonize
+    :param fig: analysed figure object
+    :return: figure object with a skeletonised image
+    """
+    img = skeletonize_skimage(fig.img)
+
+    return Figure(img, raw_img=fig.raw_img)
+
+
+def skeletonize_area_ratio(fig, panel):
+    """ Calculates the ratio of skeletonized image pixels to total number of pixels
+    :param fig: Input figure
+    :param panel: Original _panel object
+    :return: Float : Ratio of skeletonized pixels to total area (see pixel_ratio)
+    """
+    skel_fig = skeletonize(fig)
+    return pixel_ratio(skel_fig, panel)
+
+
+def mark_tiny_ccs(fig):
+    """Marks all tiny connected components
+
+    :param Figure fig: Analysed figure"""
+    [setattr(cc, 'role', FigureRoleEnum.TINY) for cc in fig.connected_components if
+     cc.area < np.percentile([cc.area for cc in fig.connected_components], 4) and cc.role is None]

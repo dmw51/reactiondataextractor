@@ -1,31 +1,39 @@
-"""This file contains the main extraction routines"""
+# -*- coding: utf-8 -*-
+"""
+Extract
+=======
+
+Main extraction routines.
+
+author: Damian Wilary
+email: dmw51@cam.ac.uk
+
+"""
+
+
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
+
 import logging
+from matplotlib import pyplot as plt
 import os
 
-
-from matplotlib import pyplot as plt
-from matplotlib.patches import Rectangle
-import numpy as np
-from PIL import Image, ImageOps
-
-from actions import (detect_structures, find_arrows, complete_structures,
-                      find_optimal_dilation_ksize, scan_form_reaction_step)
-from conditions import get_conditions, clear_conditions_region
-from models.segments import FigureRoleEnum, ReactionRoleEnum
+from actions import estimate_single_bond
+from extractors import (ArrowExtractor, ConditionsExtractor, clear_conditions_region, DiagramExtractor, LabelExtractor,
+                        RGroupResolver)
 from models.output import ReactionScheme
-from utils.io_ import imread
-from utils.processing import erase_elements
-from resolve import LabelAssigner, RGroupResolver
 from recognise import DiagramRecogniser
-import chemschematicresolver as csr
 import settings
+from utils.io_ import imread
+from utils.processing import mark_tiny_ccs
 
 log = logging.getLogger('extract')
+file_handler = logging.FileHandler('extract.log')
+log.addHandler(file_handler)
+
 
 def extract_image(filename, debug=False):
     """
@@ -36,114 +44,65 @@ def extract_image(filename, debug=False):
     :param bool debug: bool enabling debug mode
     :return Scheme: Reaction scheme object
     """
-
-    # create console handler and set level
     level = 'DEBUG' if debug else 'INFO'
     ch = logging.StreamHandler()
-    ch.setLevel(level)
-
+    log.setLevel(level)
     formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-
-    # add formatter to ch
     ch.setFormatter(formatter)
-
-    # add ch to logger
     log.addHandler(ch)
 
     MAIN_DIR = os.getcwd()
     path = os.path.join(MAIN_DIR, filename)
-    log.info(f'Extracting file: {path}')
+    log.info(f'Extraction started...')
 
     fig = imread(path)
     settings.main_figure.append(fig)
-    detect_structures(fig)  # This should be a Figure method; running during ''init''? - can't do, circular ref
-    log.debug('Bond boundary length: %d' % fig.boundary_length)
-    find_optimal_dilation_ksize(fig)
+    fig.single_bond_length = estimate_single_bond(fig)
+    mark_tiny_ccs(fig)
 
-    # global_skel_pixel_ratio = skeletonize_area_ratio(fig, fig.get_bounding_box())
-    arrows = find_arrows(fig, int(fig.boundary_length))
-    log.info('Detected %d arrows' % len(arrows))
-    structure_panels = complete_structures(fig, arrows)
-    log.info('Found %d structure panels' % len(structure_panels))
-    #### Hide the following inside a function
-    conditions, conditions_structures = zip(*[get_conditions(fig, arrow) for arrow in arrows])
-    conditions_structures = [panel for step_panels in conditions_structures for panel in step_panels]
-    [setattr(structure, 'role', ReactionRoleEnum.CONDITIONS) for structure in structure_panels
-     if structure in conditions_structures]
-    react_prod_structures = [panel for panel in structure_panels if panel not in conditions_structures]
-    ####
+    arrow_extractor = ArrowExtractor()
+    arrows = arrow_extractor.extract()
+    log.info(f'Detected {len(arrows)} arrows')
+    diag_extractor = DiagramExtractor()
+    structure_panels = diag_extractor.extract()
+    log.info(f'Found {len(structure_panels)} panels of chemical diagrams')
+    conditions_extractor = ConditionsExtractor(arrows)
+    conditions, conditions_structures = conditions_extractor.extract()
     for step_conditions in conditions:
         log.info('Conditions dictionary found: %s' % step_conditions.conditions_dct)
-    [setattr(cc, 'role', FigureRoleEnum.TINY) for cc in fig.connected_components if
-     cc.area < np.percentile([cc.area for cc in fig.connected_components], 4) and cc.role is None]
+
+    react_prod_structures = [panel for panel in structure_panels if panel not in conditions_structures]
     fig_no_cond = clear_conditions_region(fig)
 
-
-
-
-
-    # fig_clean = remove_redundant_characters(fig_no_cond, fig_no_cond.connected_components)
-    # processed = Image.fromarray(fig_no_cond.img).convert('RGB')
-    # processed = ImageOps.invert(processed)
-
-    # segmented_filepath = MAIN_DIR + '/processed' + '.tif'
-    # processed.save(segmented_filepath)
-    assigner = LabelAssigner(fig_no_cond, react_prod_structures, conditions_structures)
-    diags = assigner.create_diagrams()
+    label_extractor = LabelExtractor(fig_no_cond, react_prod_structures, conditions_structures)
+    diags = label_extractor.extract()
+    log.info('Label extraction process finished.')
 
     resolver = RGroupResolver(diags)
     resolver.analyse_labels()
 
     recogniser = DiagramRecogniser(diags)
     recogniser.recognise_diagrams()
-    ### Hide the following inside a function
-    for step_conditions in conditions:
-        if step_conditions._structure_panels:
-            cond_diags = [diag for diag in diags if diag.panel in step_conditions._structure_panels]
-            step_conditions.diags = cond_diags
-            try:
-                step_conditions.conditions_dct['other species'].extend([diag.smiles for diag in cond_diags if diag.smiles])
-            except KeyError:
-                step_conditions.conditions_dct['other species'] = [diag.smiles for diag in cond_diags if diag.smiles]
+    log.info('Diagrams have been optically recognised.')
+    conditions_extractor.add_diags_to_dicts(diags)
 
-    ####
-    steps = [scan_form_reaction_step(step_conditions, diags) for step_conditions in conditions]
-    log.info('SMILES-structure matching complete.')
     if debug:
-        colors = ['r', 'g', 'y', 'm', 'b', 'c', 'k', 'y', 'r', 'm']
-
         f = plt.figure()
-        ax = f.add_axes([0.1, 0.1, 0.9, .9])
-        ax.imshow(fig.img)
-        for panel in fig.connected_components:
-            if panel.role:
-                color = colors[panel.role.value]
-            else:
-                color = 'w'
-            rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
-                                  facecolor='none', edgecolor=color)
-            ax.add_patch(rect_bbox)
-        ax.set_title('Roles')
+        ax = f.add_axes([0, 0, 1, 1])
+        ax.imshow(fig.img, cmap=plt.cm.binary)
+        arrow_extractor.plot_extracted(ax)
+        conditions_extractor.plot_extracted(ax)
+        diag_extractor.plot_extracted(ax)
+        label_extractor.plot_extracted(ax)
+        ax.axis('off')
+        ax.set_title('Segmented image')
         plt.show()
 
-        f = plt.figure()
-        ax = f.add_axes([0.1, 0.1, 0.9, .9])
-        ax.imshow(fig.img)
-        for diag in diags:
-            panel = diag.panel
-            rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
-                                  facecolor='none', edgecolor='m')
-            ax.add_patch(rect_bbox)
-            if diag.label:
-                panel = diag.label.panel
-                rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
-                                      facecolor='none', edgecolor='g')
-                ax.add_patch(rect_bbox)
-        ax.set_title('Diagrams and labels')
-        plt.show()
+    scheme = ReactionScheme(conditions, diags)
+    log.info('Scheme completed without errors.')
 
-    scheme = ReactionScheme(steps)
-    log.info('Scheme completed without errors')
-
+    print(scheme)
+    print()
+    print(scheme.long_str())
     settings.main_figure = []
     return scheme
