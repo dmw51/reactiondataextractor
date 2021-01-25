@@ -9,6 +9,7 @@ author: Damian Wilary
 email: dmw51@cam.ac.uk
 
 """
+import os
 import logging
 import numpy as np
 
@@ -17,11 +18,12 @@ from skimage.transform import probabilistic_hough_line
 from .models.segments import Panel, Figure, FigureRoleEnum
 from .models.utils import Point, Line
 from .utils.processing import isolate_patches, skeletonize
+from . import settings
 
 log = logging.getLogger('extract.actions')
 
 formatter = logging.Formatter('%(levelname)s:%(name)s: %(message)s')
-file_handler = logging.FileHandler('actions.log')
+file_handler = logging.FileHandler(os.path.join(settings.ROOT_DIR, 'actions.log'))
 file_handler.setFormatter(formatter)
 
 ch = logging.StreamHandler()
