@@ -24,7 +24,7 @@ import os
 
 from .actions import estimate_single_bond
 from .extractors import (ArrowExtractor, ConditionsExtractor, clear_conditions_region, DiagramExtractor, LabelExtractor,
-                        RGroupResolver)
+                        RGroupResolver, VariantExtractor)
 from .models.output import ReactionScheme
 from .recognise import DiagramRecogniser
 from . import settings
@@ -67,6 +67,11 @@ def extract_image(filename, debug=False):
     log.info(f'Detected {len(arrows)} arrows')
     diag_extractor = DiagramExtractor()
     structure_panels = diag_extractor.extract()
+    ###variants
+    variant_extractor = VariantExtractor(backbones=diag_extractor.backbones)
+    variant_extractor._find_separation_line()
+    ###endvariants
+
     log.info(f'Found {len(structure_panels)} panels of chemical diagrams')
     conditions_extractor = ConditionsExtractor(arrows)
     conditions, conditions_structures = conditions_extractor.extract()

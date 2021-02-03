@@ -1,0 +1,49 @@
+{% set name = "ReactionDataExtractor" %}
+{% set version = "0.0.1" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: ../
+  #git_url: https://github.com/dmw51/reactiondataextractor.git
+
+build:
+  number: 0
+  script: pip install .
+  
+requirements:
+  build:
+    - python=3.6
+    - setuptools
+
+  run:
+    - python=3.6
+    - pillow
+    - matplotlib=2.2.4
+    - scikit-image<0.15
+    - scikit-learn
+    - scipy
+    - pytest
+    - tesserocr>=2.5
+    - cirpy
+    - chemdataextractor
+    - pyosra
+    - tesseract>=4.1.0
+    - gocr
+    - ocrad
+    - potrace
+test:
+  imports:
+    - reactiondataextractor  
+about: 
+  home: https://github.com/dmw51/rde.git 
+  license: MIT
+  license_file: 'LICENSE'
+  summary: 'Convert chemical reaction schemes into machine-readable formats'
+  description: |
+    ReactionDataExtractor
+extra:
+  recipe-maintainers:
+    - dmw51
