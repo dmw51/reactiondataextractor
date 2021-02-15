@@ -29,7 +29,7 @@ from .models.output import ReactionScheme
 from .recognise import DiagramRecogniser
 from . import settings
 from .utils.io_ import imread
-from .utils.processing import mark_tiny_ccs
+from .utils.processing import mark_tiny_ccs, mark_long_lines
 
 MAIN_DIR = os.getcwd()
 
@@ -61,6 +61,7 @@ def extract_image(filename, debug=False):
     settings.main_figure.append(fig)
     fig.single_bond_length = estimate_single_bond(fig)
     mark_tiny_ccs(fig)
+    mark_long_lines(fig)
 
     arrow_extractor = ArrowExtractor()
     arrows = arrow_extractor.extract()
@@ -68,8 +69,12 @@ def extract_image(filename, debug=False):
     diag_extractor = DiagramExtractor()
     structure_panels = diag_extractor.extract()
     ###variants
-    variant_extractor = VariantExtractor(backbones=diag_extractor.backbones)
-    variant_extractor._find_separation_line()
+    variant_extractor = VariantExtractor(structure_panels, arrows)
+
+    r_scheme_crop, variants = variant_extractor.extract()
+    if r_scheme_crop:
+        fig = r_scheme_crop
+
     ###endvariants
 
     log.info(f'Found {len(structure_panels)} panels of chemical diagrams')

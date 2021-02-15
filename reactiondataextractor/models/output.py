@@ -100,7 +100,7 @@ class ReactionScheme(Graph):
     :type fig: Figure"""
     def __init__(self, conditions, diags, fig):
         self._conditions = conditions
-        self._diags = diags
+        self._all_diags = diags
         super().__init__()
         self._reaction_steps = ([self._scan_form_reaction_step(step_conditions)
                                            for step_conditions in conditions])
@@ -109,10 +109,9 @@ class ReactionScheme(Graph):
         self._start = None  # start node(s) in a graph
         self._end = None   # end node(s) in a graph
         self._fig = fig
-        graph = self._graph_dict
         self.set_start_end_nodes()
-
         self._single_path = True if len(self._start) == 1 and len(self._end) == 1 else False
+        self._leftover_diags = self._find_leftover_diags()
 
     def edges(self):
         if not self._graph_dict:
@@ -184,7 +183,7 @@ class ReactionScheme(Graph):
         params = {'facecolor': (66 / 255, 93 / 255, 166 / 255),
                   'edgecolor': (6 / 255, 33 / 255, 106 / 255),
                   'alpha': 0.4}
-        for diag in self._diags:
+        for diag in self._all_diags:
             panel = diag.panel
             rect_bbox = Rectangle((panel.left, panel.top), panel.right - panel.left, panel.bottom - panel.top,
                                   facecolor=(52/255, 0, 103/255), edgecolor=(6/255, 0, 99/255), alpha=0.4)
@@ -360,7 +359,7 @@ class ReactionScheme(Graph):
         :rtype: ReactionStep
         """
         arrow = step_conditions.arrow
-        diags = self._diags
+        diags = self._all_diags
 
         endpoint1, endpoint2 = extend_line(step_conditions.arrow.line,
                                            extension=arrow.pixels[0].separation(arrow.pixels[-1]) * 0.75)
@@ -371,36 +370,57 @@ class ReactionScheme(Graph):
         else:
             react_endpoint, prod_endpoint = endpoint2, endpoint1
 
-        initial_distance = 1.5 * np.sqrt(np.mean([diag.panel.area for diag in diags]))
-        extended_distance = 4 * np.sqrt(np.mean([diag.panel.area for diag in diags]))
-        distance_fn = lambda diag: 1.5 * np.sqrt(diag.panel.area)
 
-        distances = initial_distance, distance_fn
-        extended_distances = extended_distance, distance_fn
-        reactants = find_nearby_ccs(react_endpoint, diags, distances,
-                                    condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
-        if not reactants:
-            reactants = find_nearby_ccs(react_endpoint, diags, extended_distances,
-                                        condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
-        if not reactants:
-            reactants = self._search_elsewhere('up-right', step_conditions.arrow, distances)
 
-        products = find_nearby_ccs(prod_endpoint, diags, distances,
-                                   condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
+        # distances = initial_distance, distance_fn
+        # extended_distances = extended_distance, distance_fn
+        def diag_elig_cond1(diag): return diag.panel.role != ReactionRoleEnum.CONDITIONS
+        def diag_elig_cond2(diag):return diag.panel.role != ReactionRoleEnum.VARIANT_STRUCTURE_DIAGRAM
+        # reactants = find_nearby_ccs(react_endpoint, diags, distances,
+        #                             condition=lambda diag: diag_elig_cond1(diag) and diag_elig_cond2(diag))
+        # if not reactants:
+        #     reactants = find_nearby_ccs(react_endpoint, diags, extended_distances,
+        #                                 condition=lambda diag: diag_elig_cond1(diag) and diag_elig_cond2(diag))
+        reactants = self._assign_roles(react_endpoint, diags)
+        if not reactants:
+            reactants = self._assign_roles(react_endpoint, diags, extended=True)
+        if not reactants:
+            reactants = self._search_elsewhere('up-right', step_conditions.arrow)
+
+        # products = find_nearby_ccs(prod_endpoint, diags, distances,
+        #                            condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
+        #
+        # if not products:
+        #     products = find_nearby_ccs(prod_endpoint, diags, extended_distances,
+        #                                condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
+
+        products = self._assign_roles(prod_endpoint, diags)
+        if not products:
+            products = self._assign_roles(prod_endpoint, diags, extended=True)
 
         if not products:
-            products = find_nearby_ccs(prod_endpoint, diags, extended_distances,
-                                       condition=lambda diag: diag.panel.role != ReactionRoleEnum.CONDITIONS)
-
-        if not products:
-            products = self._search_elsewhere('down-left', step_conditions.arrow, distances)
+            products = self._search_elsewhere('down-left', step_conditions.arrow)
 
         [setattr(reactant, 'role', ReactionRoleEnum.STEP_REACTANT) for reactant in reactants]
         [setattr(product, 'role', ReactionRoleEnum.STEP_PRODUCT) for product in products]
 
         return ReactionStep(reactants, products, conditions=step_conditions)
 
-    def _search_elsewhere(self, where, arrow, distances):
+    def _assign_roles(self, start, diags, extended=False):
+        """Helper calling ``find_nearby_ccs`` for reactant search"""
+        if extended:
+            initial_distance = 4 * np.sqrt(np.mean([diag.panel.area for diag in diags]))
+        else:
+            initial_distance = 1.5 * np.sqrt(np.mean([diag.panel.area for diag in diags]))
+
+        distance_fn = lambda diag: 1.5 * np.sqrt(diag.panel.area)
+        distances = initial_distance, distance_fn
+        def diag_elig_cond1(diag): return diag.panel.role != ReactionRoleEnum.CONDITIONS
+        def diag_elig_cond2(diag): return diag.panel.role != ReactionRoleEnum.VARIANT_STRUCTURE_DIAGRAM
+        return find_nearby_ccs(start, diags, distances,
+                                    condition=(lambda diag: diag_elig_cond1(diag) and diag_elig_cond2(diag)))
+
+    def _search_elsewhere(self, where, arrow):
         """
         Looks for structures in a different line of a multi-line reaction scheme.
 
@@ -411,14 +431,12 @@ class ReactionScheme(Graph):
         This gives clusters corresponding to the multiple lines in a reaction scheme. Performs a search in the new spot.
         :param str where: Allows either 'down-left' to look below and to the left of arrow, or 'up-right' (above to the right)
         :param Arrow arrow: Original arrow, around which the search failed
-        :param (float, lambda) distances: pair containing initial search distance and a distance function (usually same as
-        in the parent function)
         :return: Collection of found species
         :rtype: list[Diagram]
         """
         assert where in ['down-left', 'up-right']
         fig = settings.main_figure[0]
-        diags = self._diags
+        diags = self._all_diags
 
         X = np.array([s.center[1] for s in diags] + [arrow.panel.center[1]]).reshape(-1, 1)  # the y-coordinate
         eps = np.mean([s.height for s in diags])
@@ -443,6 +461,16 @@ class ReactionScheme(Graph):
             move_to_horizontal = fig.img.shape[1] - np.mean([structure.width for structure in diags])
         else:
             raise ValueError("'where' takes in one of two values : ('down-left', 'up-right') only")
-        species = find_nearby_ccs(Point(move_to_vertical, move_to_horizontal), diags, distances)
+        species = self._assign_roles(Point(move_to_vertical, move_to_horizontal), diags)
 
         return species
+
+    def _find_leftover_diags(self):
+        """Finds diagrams which were not assigned as reactants or products in any step"""
+        assigned_diags = []
+        for step in self.reaction_steps:
+            assigned_diags.extend(step.reactants)
+            assigned_diags.extend(step.products)
+
+        assigned_diags = set(assigned_diags)
+        return list(set(self._all_diags).difference(assigned_diags))

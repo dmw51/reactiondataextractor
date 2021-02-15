@@ -152,26 +152,30 @@ def erase_elements(fig, elements):
     :param iterable of panels elements: list of elements to erase from image
     :return: copy of the Figure object with elements removed
     """
-    temp_fig = copy.deepcopy(fig)
+    new_fig = copy.deepcopy(fig)
 
     try:
-        flattened = temp_fig.img.flatten()
+        flattened = new_fig.img.flatten()
         for element in elements:
-            np.put(flattened, [pixel.row * temp_fig.img.shape[1] + pixel.col for pixel in element.pixels], 0)
-        img_no_elements = flattened.reshape(temp_fig.img.shape[0], temp_fig.img.shape[1])
-        temp_fig.img = img_no_elements
+            np.put(flattened, [pixel.row * new_fig.img.shape[1] + pixel.col for pixel in element.pixels], 0)
+        img_no_elements = flattened.reshape(new_fig.img.shape[0], new_fig.img.shape[1])
+        new_fig.img = img_no_elements
 
     except AttributeError:
         for element in elements:
-            temp_fig.img[element.top:element.bottom+1, element.left:element.right+1] = 0
+            img_copy = new_fig.img.copy()
+            img_copy[element.top:element.bottom+1, element.left:element.right+1] = 0
+            new_fig.img = img_copy  # connected componenets need to be reevaluated - cannot just mutate original img
 
-    new_fig = Figure(temp_fig.img, fig.raw_img)
-    if hasattr(fig, 'kernel_sizes'):
-        new_fig.kernel_sizes = fig.kernel_sizes
-    for cc1 in new_fig.connected_components:
-        for cc2 in fig.connected_components:
-            if cc1 == cc2:
-                cc1.role = cc2.role   # Copy roles of ccs
+    # new_fig = fig.__class__(temp_fig.img, fig.raw_img)
+    # if hasattr(fig, 'kernel_sizes'):
+    #     new_fig.kernel_sizes = fig.kernel_sizes
+    # for cc1 in new_fig.connected_components:
+    #     for cc2 in fig.connected_components:
+    #         if cc1 == cc2:
+    #             cc1.role = cc2.role   # Copy roles of ccs
+    # if hasattr(fig, 'single_bond_length'):
+    #     new_fig.single_bond_length = fig.single_bond_length
 
     return new_fig
 
@@ -527,3 +531,22 @@ def mark_tiny_ccs(fig):
     :param Figure fig: Analysed figure"""
     [setattr(cc, 'role', FigureRoleEnum.TINY) for cc in fig.connected_components if
      cc.area < np.percentile([cc.area for cc in fig.connected_components], 4) and cc.role is None]
+
+
+def mark_long_lines(fig):
+
+    skeletonized = skeletonize(fig)
+
+    long_line_thresh = fig.img.shape[1] * 0.5
+    all_lines = probabilistic_hough_line(skeletonized.img,
+                                         line_length=int(long_line_thresh), line_gap=2)  # solid lines
+    long_lines = []
+    for line in all_lines:
+        p1, p2 = line
+        parent_cc = [cc for cc in fig.connected_components if p1[0] in range(cc.left, cc.right+1)
+                     and p1[1] in range(cc.top, cc.bottom+1)][0]
+        long_lines.append(parent_cc)
+    if long_lines:
+        [setattr(cc, 'role', FigureRoleEnum.LONG_LINE) for cc in fig.connected_components]
+        fig._long_lines = long_lines
+

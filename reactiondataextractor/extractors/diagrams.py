@@ -34,6 +34,7 @@ class DiagramExtractor(BaseExtractor):
     :type arrows: list[SolidArrow]"""
     def __init__(self, fig=None, arrows=None):
         self.fig = fig if fig is not None else settings.main_figure[0]
+        self._proc_fig = self._preprocess_fig()
         self.arrows = arrows if arrows is not None else []
         self._extracted = None
         self.backbones = None
@@ -46,8 +47,11 @@ class DiagramExtractor(BaseExtractor):
     def extract(self):
         """Main extraction method"""
         self.backbones = self.detect_backbones()
-        self.fig.kernel_sizes = self._find_optimal_dilation_ksize()
+        kernel_sizes = self._find_optimal_dilation_ksize()
+        self.fig.kernel_sizes = kernel_sizes
+        self._proc_fig.kernel_sizes = kernel_sizes   # How to make these two assignments more elegant?
         self._extracted = self.complete_structures()
+        self.fig.diagrams = self._extracted
         return self.extracted
 
     def plot_extracted(self, ax):
@@ -70,7 +74,7 @@ class DiagramExtractor(BaseExtractor):
         :return: connected components classified as structural backbones
         :rtype: list
         """
-        fig = self.fig
+        fig = self._proc_fig
         ccs = fig.connected_components
         ccs = sorted(ccs, key=lambda panel: panel.area, reverse=True)
         cc_lines = []
@@ -114,7 +118,7 @@ class DiagramExtractor(BaseExtractor):
         :return:bounding boxes of chemical structures
         :rtype: list
         """
-        fig = self.fig
+        fig = self._proc_fig
         fig_no_arrows = erase_elements(fig, self.arrows)
         dilated_structure_panels, other_ccs = self.find_dilated_structures(fig_no_arrows)
         structure_panels = self._complete_structures(dilated_structure_panels)
@@ -146,7 +150,7 @@ class DiagramExtractor(BaseExtractor):
         :rtype: tuple of lists
         """
         if fig is None:
-            fig = self.fig
+            fig = self._proc_fig
         dilated_structure_panels = []
         other_ccs = []
         dilated_imgs = {}
@@ -182,7 +186,7 @@ class DiagramExtractor(BaseExtractor):
         their panels are situated fully inside panels of chemical diagrams (common with labels).
         :return: None (mutates ''role'' attribute of each relevant connected component)
         """
-        fig = self.fig
+        fig = self._proc_fig
 
         for parent_panel in structure_panels:
             for cc in fig.connected_components:
@@ -224,7 +228,7 @@ class DiagramExtractor(BaseExtractor):
         :rtype: dict
         """
 
-        backbones = [cc for cc in self.fig.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
+        backbones = [cc for cc in self._proc_fig.connected_components if cc.role == FigureRoleEnum.STRUCTUREBACKBONE]
 
         kernel_sizes = {}
         for backbone in backbones:
@@ -244,3 +248,6 @@ class DiagramExtractor(BaseExtractor):
 
         log.debug(f'Structure segmentation kernels:{kernel_sizes.values()}')
         return kernel_sizes
+
+    def _preprocess_fig(self):
+        return erase_elements(self.fig, self.fig.long_lines) if self.fig.long_lines else self.fig

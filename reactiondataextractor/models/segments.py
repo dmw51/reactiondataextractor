@@ -72,7 +72,8 @@ class FigureRoleEnum(Enum):
     STRUCTUREAUXILIARY = 6   # Either a solitary bond-line (e.g. double bond) ar a superatom label
     BONDLINE = 7
     OTHER = 8
-    TINY = 9   # Used for tiny ccs that have not been assigned (noise or small dots)
+    TINY = 9 # Used for tiny ccs that have not been assigned (noise or small dots)
+    LONG_LINE = 10
 
 
 class ReactionRoleEnum(Enum):
@@ -88,6 +89,7 @@ class ReactionRoleEnum(Enum):
     CONDITIONS = 2
     LABEL = 4
     GENERIC_STRUCTURE_DIAGRAM = 5
+    VARIANT_STRUCTURE_DIAGRAM = 6
     STEP_REACTANT = 9
     STEP_PRODUCT = 10
 
@@ -378,13 +380,15 @@ class Figure(object):
         :param numpy.ndarray raw_img: raw image (without preprocessing, e.g. binarisation)
 
         """
-        self.img = img
+        self._img = img
         self.raw_img = raw_img
-        self.kernel_sizes = None
+        self.kernel_sizes = {}
         self.single_bond_length = None
         self.width, self.height = img.shape[1], img.shape[0]
         self.center = (int(self.width * 0.5), int(self.height) * 0.5)
         self.connected_components = None
+        self.diagrams = None
+        self._long_lines = None
         self.get_connected_components()
 
     def __repr__(self):
@@ -397,8 +401,21 @@ class Figure(object):
         return (self.img == other.img).all()
 
     @property
+    def img(self):
+        return self._img
+
+    @img.setter
+    def img(self, value):
+        self._img = value
+        self.get_connected_components()
+
+    @property
     def diagonal(self):
         return np.hypot(self.width, self.height)
+
+    @property
+    def long_lines(self):
+        return self._long_lines
 
     def get_bounding_box(self):
         """ Returns the Panel object for the extreme bounding box of the image
