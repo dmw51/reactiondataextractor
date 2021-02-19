@@ -26,7 +26,6 @@ from .reaction import Conditions
 from .. import settings
 
 import matplotlib
-matplotlib.use('Agg')
 
 class Graph(ABC):
     """

@@ -34,7 +34,6 @@ from .utils.processing import mark_tiny_ccs
 MAIN_DIR = os.getcwd()
 
 import matplotlib
-matplotlib.use('Agg')
 
 log = logging.getLogger('extract')
 file_handler = logging.FileHandler(os.path.join(settings.ROOT_DIR, 'extract.log'))
