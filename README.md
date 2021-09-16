@@ -1,4 +1,4 @@
-**ReactionDataExtractor** is a toolkit for the automatic extraction of data from chemical reaction schemes..
+**ReactionDataExtractor** is a toolkit for automatic extraction of data from chemical reaction schemes.
 
 This guide provides a quick tour through ReactionDataExtractor concepts and functionality.
 
