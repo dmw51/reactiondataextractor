@@ -33,7 +33,7 @@ Once this is created, enter this environment with the command
 
 and install ReactionDataExtractor by typing
 
-    conda install -c dmw51 ReactionDataExtractor
+    conda install -c dmwil ReactionDataExtractor
     
 This command installs ReactionDataExtractor and all its dependencies from the author's channel.
 This includes [**pyosra**](https://github.com/dmw51/pyosra), the Python wrapper for the OSRA toolkit, and [**ChemDataExtractor**](http://chemdataextractor.org), a library used for natural language processing.
