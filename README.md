@@ -15,9 +15,12 @@ This guide provides a quick tour through ReactionDataExtractor concepts and func
 
 # Installation
 
-There are two ways to install the package. The first option is recommended due to its simplicity.
+There are three ways to install the package. The first option is recommended due to its simplicity.
 
-### Option 1 - Installation via Conda
+### Option 1 - Running ReactionDataExtractor inside a Docker container
+This is the simplest and most universal approach making the tool much more portable. Details on the installation process can be found [here](https://hub.docker.com/repository/docker/dmwil/reactiondataextractor)
+
+### Option 2 - Installation via Conda
 
 Anaconda Python is a self-contained Python environment that is useful for scientific applications.
 
@@ -44,7 +47,7 @@ Finally, download the **data files** for [ChemDataExtractor](http://chemdataextr
     
 *This method of installation is currently supported on ubuntu machines only*
 
-### Option 2 - Installation from source
+### Option 3 - Installation from source
 
 We **strongly recommend** installation via conda whenever possible as all the dependencies are automatically handled. 
 If this cannot be done, advanced users are invited to compile the code from source. These code repositories can be found at the locations below:
