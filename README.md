@@ -17,7 +17,7 @@ This guide provides a quick tour through ReactionDataExtractor concepts and func
 
 There are three ways to install the package. The first option is recommended due to its simplicity.
 
-### Option 1 - Running ReactionDataExtractor inside a Docker container
+### Option 1 - Running ReactionDataExtractor inside a Docker container - Recommended
 This is the simplest and most universal approach making the tool much more portable. Details on the installation process can be found [here](https://hub.docker.com/repository/docker/dmwil/reactiondataextractor)
 
 ### Option 2 - Installation via Conda
